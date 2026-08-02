@@ -1,0 +1,8 @@
+# binarios compilados
+/mcast-dup
+/mcast-dup.exe
+*.exe
+*.test
+
+# config real, que no es la de ejemplo
+/mcast-dup.json

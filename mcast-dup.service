@@ -1,0 +1,32 @@
+[Unit]
+Description=mcast-dup — duplicador de flujos multicast UDP
+Documentation=https://github.com/eFeSpain/mcast-dup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# systemd no propaga LANG, así que los mensajes saldrán en inglés. Para verlos
+# en español, añade -lang es aquí o descomenta el Environment de abajo.
+ExecStart=/usr/local/bin/mcast-dup -config /etc/mcast-dup.json
+# Environment=LANG=es_ES.UTF-8
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+
+# El relé solo necesita red: nada de privilegios ni de escribir en disco.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+# Descomenta solo si algún puerto de origen es menor que 1024:
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

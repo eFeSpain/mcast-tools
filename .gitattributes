@@ -1,0 +1,3 @@
+# LF en todo, también en el árbol de trabajo: la unidad systemd y el workflow
+# de CI se rompen o se ensucian con CRLF.
+* text=auto eol=lf
