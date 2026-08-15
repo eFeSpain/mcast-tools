@@ -1086,3 +1086,52 @@ func TestWarnsAboutUnknownConfigFields(t *testing.T) {
 		t.Fatalf("el resto de la config no se ha leído: %+v", c)
 	}
 }
+
+// Los binarios son estáticos: el ejecutable que se distribuye lleva dentro el
+// runtime de Go y las dependencias, y sus licencias BSD piden reproducir el
+// aviso al redistribuir en forma binaria. THIRD-PARTY-NOTICES.md es ese aviso.
+//
+// El fallo clásico de un fichero así es quedarse obsoleto en silencio: alguien
+// sube una versión, o añade una dependencia, y el aviso sigue nombrando lo de
+// antes. Esto lo convierte en un fallo de compilación de la suite.
+func TestThirdPartyNoticesMatchGoMod(t *testing.T) {
+	raiz := filepath.Join("..", "..")
+	gomod, err := os.ReadFile(filepath.Join(raiz, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	avisos, err := os.ReadFile(filepath.Join(raiz, "THIRD-PARTY-NOTICES.md"))
+	if err != nil {
+		t.Fatalf("no hay fichero de avisos de terceros: %v", err)
+	}
+	texto := string(avisos)
+
+	// Las líneas de dependencia son "<ruta> <versión>", dentro o fuera del
+	// bloque require. Basta con que la ruta lleve un punto en el primer
+	// segmento: eso descarta "module", "go" y las directivas.
+	deps := 0
+	for _, linea := range strings.Split(string(gomod), "\n") {
+		campos := strings.Fields(strings.TrimSpace(linea))
+		if len(campos) < 2 || !strings.HasPrefix(campos[1], "v") {
+			continue
+		}
+		ruta, version := campos[0], campos[1]
+		if !strings.Contains(strings.SplitN(ruta, "/", 2)[0], ".") {
+			continue
+		}
+		deps++
+		if !strings.Contains(texto, ruta) {
+			t.Errorf("%s está en go.mod y no aparece en THIRD-PARTY-NOTICES.md: "+
+				"hay que añadir su licencia, con el texto literal de su fichero LICENSE", ruta)
+			continue
+		}
+		if !strings.Contains(texto, version) {
+			t.Errorf("%s: go.mod dice %s y el fichero de avisos no lo menciona; "+
+				"la versión de la tabla se ha quedado atrás", ruta, version)
+		}
+	}
+	if deps == 0 {
+		t.Fatal("no se ha reconocido ninguna dependencia en go.mod: el test no está comprobando nada")
+	}
+	t.Logf("%d dependencias comprobadas contra el fichero de avisos", deps)
+}

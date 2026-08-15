@@ -649,3 +649,9 @@ there and startup says so explicitly, per channel.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The binaries are static, so the executable carries the Go runtime plus
+`golang.org/x/net` and `x/sys` inside it — all three BSD 3-Clause. Their
+notices are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), which is what
+those licenses require when redistributing in binary form; keep it in step with
+`go.mod`.

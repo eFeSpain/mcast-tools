@@ -647,3 +647,8 @@ arranque lo avisa explícitamente por canal.
 ## Licencia
 
 MIT. Ver [LICENSE](LICENSE).
+
+Los binarios son estáticos, así que el ejecutable lleva dentro el runtime de Go
+y `golang.org/x/net` y `x/sys`, los tres BSD 3-Clause. Sus avisos están en
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), que es lo que esas licencias
+piden al redistribuir en forma binaria — actualízalo si cambia `go.mod`.
