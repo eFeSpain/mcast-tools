@@ -212,6 +212,12 @@ Nada de lo que ya está emitiendo se corta por un error de edición:
 - Un canal que **sí sigue en el fichero pero cuya configuración nueva no
   valida** se queda como estaba, emitiendo, y se avisa por log. Solo se paran
   los canales que desaparecen del fichero, que es una decisión deliberada.
+- Con una excepción: si conservarlo **chocaría con los canales que sí han
+  validado**, se para y se explica. Conservar a ciegas reintroduciría por la
+  puerta de atrás justo lo que la validación acaba de rechazar — basta con
+  intercambiar dos destinos y equivocarse en el segundo canal para acabar con
+  un bucle de realimentación en el relé, o con dos canales del emisor apuntando
+  al mismo grupo.
 
 ### Las estadísticas
 

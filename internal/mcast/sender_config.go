@@ -333,6 +333,20 @@ func resolveSendChannels(c SendConfig, statsFlag float64) sendResolved {
 	return r
 }
 
+// sendCompatible dice si un canal conservado de una recarga anterior puede
+// convivir con los que sí han validado ahora: dos canales al mismo destino
+// entrelazan sus flujos, y es justo lo que la validación rechaza al arrancar.
+// Sin esta comprobación bastaba con intercambiar dos destinos y equivocarse en
+// el segundo canal para acabar con los dos emitiendo al mismo grupo.
+func sendCompatible(cand SendCfg, with []SendCfg) bool {
+	for _, e := range with {
+		if e.Dest == cand.Dest {
+			return false
+		}
+	}
+	return true
+}
+
 // sendConfigFromFlags convierte el modo flags en una SendConfig de un canal,
 // para que pase por las mismas validaciones que el modo daemon.
 func sendConfigFromFlags(dst, file string, stdin bool, bitrate string, size int,

@@ -211,6 +211,12 @@ Nothing that is already on air is cut by an editing mistake:
   validate** keeps running exactly as it was, with a warning in the log. Only
   channels that disappear from the file are stopped, which is a deliberate
   decision.
+- With one exception: if keeping it would **clash with the channels that did
+  validate**, it is stopped and the reason is logged. Keeping it blindly would
+  reintroduce through the back door exactly what validation just rejected — it
+  only takes swapping two destinations and mistyping the second channel to end
+  up with a feedback loop in the relay, or two sender channels aimed at the
+  same group.
 
 ### Reading the statistics
 

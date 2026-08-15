@@ -829,7 +829,7 @@ func TestReloadKeepsRunningChannelWhoseNewConfigIsInvalid(t *testing.T) {
 	m.apply([]EffCfg{fakeChannel("a"), fakeChannel("b")})
 
 	// "a" venía en el fichero pero no ha validado; "b" sigue bien.
-	desired := m.keepRunning([]EffCfg{fakeChannel("b")}, map[string]bool{"a": true})
+	desired := m.keepRunning([]EffCfg{fakeChannel("b")}, map[string]bool{"a": true}, relayCompatible)
 
 	if chanNames(desired) != "b,a" {
 		t.Fatalf("canales deseados = %q, quiero conservar también \"a\"", chanNames(desired))
@@ -841,10 +841,32 @@ func TestReloadStopsChannelThatWasRemovedFromTheFile(t *testing.T) {
 	m.apply([]EffCfg{fakeChannel("a"), fakeChannel("b")})
 
 	// "a" ya no aparece en el fichero y nadie lo ha rechazado: eso sí se para.
-	desired := m.keepRunning([]EffCfg{fakeChannel("b")}, map[string]bool{})
+	desired := m.keepRunning([]EffCfg{fakeChannel("b")}, map[string]bool{}, relayCompatible)
 
 	if chanNames(desired) != "b" {
 		t.Fatalf("canales deseados = %q, quiero solo \"b\"", chanNames(desired))
+	}
+}
+
+// En el relé el choque es un bucle de realimentación: si "b" se conserva con su
+// config vieja y "a" ya ha validado apuntando al origen de "b", el flujo da
+// vueltas hasta saturar la NIC. Es justo lo que la validación impide al
+// arrancar, y conservar a ciegas lo reintroducía.
+func TestKeptRelayChannelCannotCloseAFeedbackLoop(t *testing.T) {
+	useLang(t, langEN)
+	m := testManager(t)
+
+	viejoB := EffCfg{Name: "b", Source: "239.0.20.1:5000",
+		Dest: []string{"239.0.10.1:5000"}, TTL: 1} // b: 20.1 -> 10.1
+	m.apply([]EffCfg{viejoB})
+
+	// "a" valida y emite hacia el origen de "b": juntos cierran el ciclo.
+	nuevoA := EffCfg{Name: "a", Source: "239.0.10.1:5000",
+		Dest: []string{"239.0.20.1:5000"}, TTL: 1} // a: 10.1 -> 20.1
+	desired := m.keepRunning([]EffCfg{nuevoA}, map[string]bool{"b": true}, relayCompatible)
+
+	if chanNames(desired) != "a" {
+		t.Fatalf("canales = %q: se ha conservado uno que cierra un bucle", chanNames(desired))
 	}
 }
 

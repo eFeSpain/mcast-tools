@@ -273,6 +273,53 @@ func testSendManager(t *testing.T) *Manager[SendCfg] {
 	return m
 }
 
+// Conservar a ciegas un canal rechazado reintroduce por la puerta de atrás lo
+// que la validación acaba de rechazar. El escenario: el operador intercambia
+// los destinos de dos canales y se equivoca al escribir el segundo.
+func TestKeptChannelCannotCollideWithAnAcceptedOne(t *testing.T) {
+	useLang(t, langEN)
+	m := testSendManager(t)
+
+	viejoA := SendCfg{Name: "a", Dest: "239.0.10.1:5000", Bitrate: 1e6, Size: 1316}
+	viejoB := SendCfg{Name: "b", Dest: "239.0.20.1:5000", Bitrate: 1e6, Size: 1316}
+	m.apply([]SendCfg{viejoA, viejoB})
+
+	// Recarga: "a" pasa a emitir al destino que tenía "b", y "b" no valida
+	// (bitrate ilegible, por ejemplo). Conservar "b" tal cual lo pondría a
+	// emitir al mismo grupo que "a".
+	nuevoA := SendCfg{Name: "a", Dest: "239.0.20.1:5000", Bitrate: 1e6, Size: 1316}
+	desired := m.keepRunning([]SendCfg{nuevoA}, map[string]bool{"b": true}, sendCompatible)
+
+	if len(desired) != 1 {
+		t.Fatalf("canales = %s: se ha conservado uno que emite al mismo destino que otro",
+			sendNames(desired))
+	}
+	if desired[0].Dest != "239.0.20.1:5000" {
+		t.Fatalf("el canal que queda no es el que validó: %+v", desired[0])
+	}
+}
+
+// Y si no choca, se conserva como siempre: el arreglo no puede volverse
+// paranoico y tirar canales que sí podían seguir.
+func TestKeptChannelSurvivesWhenItDoesNotCollide(t *testing.T) {
+	useLang(t, langEN)
+	m := testSendManager(t)
+
+	m.apply([]SendCfg{
+		{Name: "a", Dest: "239.0.10.1:5000", Bitrate: 1e6, Size: 1316},
+		{Name: "b", Dest: "239.0.20.1:5000", Bitrate: 1e6, Size: 1316},
+	})
+
+	// "b" se rechaza pero su destino de siempre no lo usa nadie más.
+	desired := m.keepRunning(
+		[]SendCfg{{Name: "a", Dest: "239.0.10.1:5000", Bitrate: 1e6, Size: 1316}},
+		map[string]bool{"b": true}, sendCompatible)
+
+	if sendNames(desired) != "a,b" {
+		t.Fatalf("canales = %q, quiero conservar también \"b\"", sendNames(desired))
+	}
+}
+
 // ─── Alineación de transport stream ──────────────────────────────────────────
 
 // tsFile escribe un fichero con pinta de TS: 0x47 al principio de cada paquete

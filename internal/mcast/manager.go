@@ -210,7 +210,15 @@ func (m *Manager[T]) apply(desired []T) {
 // keepRunning conserva los canales que siguen emitiendo pero cuya configuración
 // nueva no ha validado: se quedan tal y como estaban en vez de pararse. Los que
 // simplemente ya no aparecen en el fichero sí se paran, como siempre.
-func (m *Manager[T]) keepRunning(desired []T, rejected map[string]bool) []T {
+//
+// compatible decide si la configuración VIEJA de un canal puede convivir con
+// las nuevas que sí han validado. Hace falta porque conservar a ciegas
+// reintroduce por la puerta de atrás justo lo que la validación acaba de
+// rechazar: basta con que el operador intercambie dos destinos y se equivoque
+// en el segundo canal para que el primero se acepte con el destino del segundo
+// y el segundo se conserve con el suyo antiguo, los dos emitiendo al mismo
+// grupo. Lo que no cabe, se para y se dice por qué.
+func (m *Manager[T]) keepRunning(desired []T, rejected map[string]bool, compatible func(T, []T) bool) []T {
 	if len(rejected) == 0 {
 		return desired
 	}
@@ -228,10 +236,16 @@ func (m *Manager[T]) keepRunning(desired []T, rejected map[string]bool) []T {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, name := range names {
-		if w, ok := m.wk[name]; ok {
-			desired = append(desired, w.cfg)
-			m.errl.Printf(txt.warnKeptRunning, name)
+		w, ok := m.wk[name]
+		if !ok {
+			continue
 		}
+		if compatible != nil && !compatible(w.cfg, desired) {
+			m.errl.Printf(txt.warnCannotKeep, name)
+			continue
+		}
+		desired = append(desired, w.cfg)
+		m.errl.Printf(txt.warnKeptRunning, name)
 	}
 	return desired
 }

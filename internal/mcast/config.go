@@ -222,6 +222,25 @@ func configFromFlags(src, dst, from, iface string, ttl int, loop bool, rcvbuf, s
 	}}}
 }
 
+// relayCompatible dice si un canal conservado de una recarga anterior puede
+// convivir con los que sí han validado ahora. Lo que no puede pasar es que
+// reaparezca un bucle de realimentación por la puerta de atrás: la validación
+// lo comprueba sobre la config nueva, y el canal conservado no pasó por ahí.
+func relayCompatible(cand EffCfg, with []EffCfg) bool {
+	sa, err := net.ResolveUDPAddr("udp4", cand.Source)
+	if err != nil {
+		return false
+	}
+	g := feedback{}
+	for _, e := range with {
+		if a, err := net.ResolveUDPAddr("udp4", e.Source); err == nil {
+			g.add(a.String(), e.Dest) // Dest ya viene canónico de resolveChannels
+		}
+	}
+	_, loops := g.wouldLoop(sa.String(), cand.Dest)
+	return !loops
+}
+
 // resolved es el resultado de validar una configuración entera.
 type resolved struct {
 	channels []EffCfg

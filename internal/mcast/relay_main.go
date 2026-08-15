@@ -96,7 +96,7 @@ func RelayMain() {
 		// Un canal que ya está emitiendo y cuya nueva config no valida NO se
 		// para: una errata al editar el JSON no debe cortar el flujo en destino.
 		// Se conserva tal cual estaba y se avisa.
-		desired := mgr.keepRunning(r.channels, r.rejected)
+		desired := mgr.keepRunning(r.channels, r.rejected, relayCompatible)
 		mgr.setStatsInterval(r.stats)
 		mgr.apply(desired)
 		return true

@@ -62,6 +62,7 @@ type msgs struct {
 	warnFeedbackLoop string
 	warnBadTTL       string
 	warnKeptRunning  string
+	warnCannotKeep   string
 	warnPortZero     string
 	warnStatsRange   string
 	warnUnknownField string
@@ -168,6 +169,7 @@ var msgsEN = msgs{
 	warnFeedbackLoop: "channel '%s' creates a feedback loop (%s feeds back into %s), ignored",
 	warnBadTTL:       "channel '%s' has ttl %d out of range [0,255], ignored",
 	warnKeptRunning:  "channel '%s' was rejected on reload; the one already running stays untouched",
+	warnCannotKeep:   "channel '%s' was rejected on reload and cannot be kept running either: its previous settings clash with the ones that did validate; stopped",
 	warnPortZero:     "channel '%s' address %s has no port (or port 0): it would never receive or send anything, ignored",
 	warnStatsRange:   "stats interval %v is out of range, using %v",
 	warnUnknownField: "unknown field ignored (%v)",
@@ -270,6 +272,7 @@ var msgsES = msgs{
 	warnFeedbackLoop: "canal '%s' crea un bucle de realimentación (%s realimenta a %s), ignorado",
 	warnBadTTL:       "canal '%s' tiene ttl %d fuera del rango [0,255], ignorado",
 	warnKeptRunning:  "canal '%s' rechazado en la recarga; se mantiene en marcha el que ya estaba",
+	warnCannotKeep:   "canal '%s' rechazado en la recarga y tampoco se puede mantener: su configuración anterior choca con las que sí han validado; detenido",
 	warnPortZero:     "canal '%s': la dirección %s no lleva puerto (o es el 0), no recibiría ni enviaría nada; ignorado",
 	warnStatsRange:   "el intervalo de stats %v está fuera de rango, se usa %v",
 	warnUnknownField: "campo desconocido ignorado (%v)",

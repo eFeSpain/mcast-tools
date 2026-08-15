@@ -94,7 +94,7 @@ func SendMain() {
 		}
 		// Igual que en el relé: un canal que ya está emitiendo y cuya config
 		// nueva no valida se queda como estaba en vez de cortarse.
-		desired := mgr.keepRunning(r.channels, r.rejected)
+		desired := mgr.keepRunning(r.channels, r.rejected, sendCompatible)
 		mgr.setStatsInterval(r.stats)
 		mgr.apply(desired)
 		return true
