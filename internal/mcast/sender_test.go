@@ -162,6 +162,48 @@ func TestSenderDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+// "bitrate": "pcr" activa el pacing por el reloj del flujo, pero el número
+// sigue haciendo falta como estimación de arranque: hasta el segundo PCR no hay
+// ritmo medido. Tirarlo y forzar 10M dejaba un flujo de 50 Mbps emitiendo a
+// una quinta parte durante los primeros milisegundos.
+func TestSenderPCRInheritsTheConfiguredBitrateAsBootstrap(t *testing.T) {
+	c := SendConfig{
+		Defaults: SendDefaults{Iface: "10.30.0.5", Size: 1316, Bitrate: "50M"},
+		Channels: []SendChannelCfg{
+			{Name: "hereda", Dest: "239.0.11.1:5000", Bitrate: "pcr"},
+			{Name: "propio", Dest: "239.0.11.2:5000", Bitrate: "PCR", Size: 7 * tsPacket},
+		},
+	}
+
+	r := resolveSendChannels(c, 10)
+	if len(r.channels) != 2 {
+		t.Fatalf("canales = %d: %v", len(r.channels), r.warns)
+	}
+	for _, ch := range r.channels {
+		if !ch.PCR {
+			t.Errorf("%s: PCR no activado con bitrate \"pcr\"", ch.Name)
+		}
+		if ch.Bitrate != 50_000_000 {
+			t.Errorf("%s: bootstrap = %d, quiero los 50M de defaults (no la constante interna)",
+				ch.Name, ch.Bitrate)
+		}
+	}
+
+	// Y si tampoco hay número en defaults, se cae a la constante en vez de
+	// fallar: "pcr" no es un bitrate que parseBitrate sepa leer.
+	solo := SendConfig{
+		Defaults: SendDefaults{Iface: "10.30.0.5", Size: 1316, Bitrate: "pcr"},
+		Channels: []SendChannelCfg{{Name: "x", Dest: "239.0.11.3:5000"}},
+	}
+	r2 := resolveSendChannels(solo, 10)
+	if len(r2.channels) != 1 {
+		t.Fatalf("canales = %d: %v", len(r2.channels), r2.warns)
+	}
+	if !r2.channels[0].PCR || r2.channels[0].Bitrate <= 0 {
+		t.Errorf("sin número en defaults: PCR=%v bitrate=%d", r2.channels[0].PCR, r2.channels[0].Bitrate)
+	}
+}
+
 // El nombre automático sale del destino, no de la posición: insertar un canal
 // no puede renombrar y reiniciar a los demás.
 func TestSenderAutomaticNameComesFromDest(t *testing.T) {

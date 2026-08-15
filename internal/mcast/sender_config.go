@@ -325,10 +325,19 @@ func resolveSendChannels(c SendConfig, statsFlag float64) sendResolved {
 		}
 		// "pcr" pide que el ritmo lo marque el reloj del propio transport
 		// stream. El bitrate configurado sigue haciendo falta como estimación
-		// inicial: hasta el segundo PCR no hay ritmo medido.
+		// inicial: hasta el segundo PCR no hay ritmo medido, y arrancar con una
+		// estimación muy baja en un flujo de 50 Mbps deja los primeros
+		// milisegundos emitiendo a cámara lenta.
+		//
+		// Por eso se hereda el de defaults en vez de forzar la constante: quien
+		// pone "bitrate": "pcr" en un canal y 50M en defaults está diciendo por
+		// dónde anda el material.
 		porPCR := strings.EqualFold(strings.TrimSpace(rate), "pcr")
 		if porPCR {
-			rate = defBitrate
+			rate = d.Bitrate
+			if strings.EqualFold(strings.TrimSpace(rate), "pcr") {
+				rate = defBitrate
+			}
 		}
 		bps, err := parseBitrate(rate)
 		if err != nil {

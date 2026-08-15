@@ -40,6 +40,11 @@ import (
 // vez de intentar recuperar el retraso de golpe. Unos pocos periodos típicos.
 const maxBehind = 50 * time.Millisecond
 
+// maxAhead es lo más que se espera a que llegue el instante de un datagrama.
+// Protege del caso simétrico al de maxBehind: un PCR que salta hacia delante
+// dejaría el canal callado justo ese tiempo.
+const maxAhead = 2 * time.Second
+
 // errSourceDone dice que la fuente se ha agotado y el canal ha terminado su
 // trabajo. NO es una caída: si supervise lo tomara por tal, reabriría el
 // fichero cada 3 s y un "-loop-file=false" acabaría emitiendo en bucle igual.
@@ -376,7 +381,24 @@ func runSender(ctx context.Context, e SendCfg, st *stats, errl *log.Logger) erro
 		pacer = newPCRPacer(float64(e.Bitrate) / 8)
 	}
 	start := time.Now()
-	var bytesSent float64
+	var bytesSent, startBytes float64
+
+	// rebase mueve el ancla al momento actual en vez de intentar recuperar un
+	// desfase de golpe. Tiene que tocar el reloj que MANDA: si hay pacer de PCR
+	// activo, reanclar solo el de bitrate fijo no sirve de nada, porque el
+	// objetivo lo sigue calculando el pacer sobre su ancla vieja y la ráfaga
+	// ocurre igual.
+	rebase := func(now time.Time, desfase time.Duration) {
+		atomic.AddUint64(&st.drops, 1) // se cuenta como rebase del reloj
+		if desfase < 0 {
+			desfase = -desfase
+		}
+		st.lastDrop.Store(fmt.Sprintf(txt.logClockRebase, desfase.Round(time.Millisecond)))
+		start, startBytes = now, bytesSent
+		if pacer != nil {
+			pacer.rebase(now, bytesSent)
+		}
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -420,7 +442,12 @@ func runSender(ctx context.Context, e SendCfg, st *stats, errl *log.Logger) erro
 		// dice el propio flujo; si no, el bitrate configurado. En los dos casos
 		// es una referencia absoluta, así que el error de cada sueño no se
 		// acumula.
-		target := start.Add(time.Duration(bytesSent * perByte))
+		//
+		// bytesSent es un eje monótono que NO se reinicia nunca: lo comparten el
+		// reloj de bitrate fijo (contra startBytes) y el pacer de PCR (contra su
+		// lastBytes). Reiniciarlo dejaba a los dos en sistemas de coordenadas
+		// distintos y era justo lo que rompía el freno de más abajo.
+		target := start.Add(time.Duration((bytesSent - startBytes) * perByte))
 		if pacer != nil && pacer.started {
 			if t := pacer.target(bytesSent); !t.IsZero() {
 				target = t
@@ -428,6 +455,11 @@ func runSender(ctx context.Context, e SendCfg, st *stats, errl *log.Logger) erro
 		}
 		wait := time.Until(target)
 		switch {
+		case wait > maxAhead:
+			// Objetivo absurdamente lejano: un PCR que ha saltado hacia delante
+			// (material empalmado, un ffmpeg que rearranca con otro reloj)
+			// dejaría el canal mudo todo ese rato. Se rebasa y se sigue.
+			rebase(now, wait)
 		case wait > 0:
 			select {
 			case <-time.After(wait):
@@ -440,10 +472,7 @@ func runSender(ctx context.Context, e SendCfg, st *stats, errl *log.Logger) erro
 			// (ffmpeg tardando en arrancar, un disco con un hipo) o cuando da
 			// menos bitrate del pedido: sin este tope, a partir de ahí el
 			// emisor no volvería a dormir nunca y el pacing desaparecería.
-			atomic.AddUint64(&st.drops, 1) // se cuenta como rebase del reloj
-			st.lastDrop.Store(fmt.Sprintf(txt.logClockRebase, (-wait).Round(time.Millisecond)))
-			start = time.Now()
-			bytesSent = 0
+			rebase(now, wait)
 		}
 	}
 }

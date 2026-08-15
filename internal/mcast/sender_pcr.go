@@ -22,6 +22,11 @@ const pcrClockHz = 27_000_000
 // así que con 4 MB hay de sobra incluso a 100 Mbps.
 const pcrProbeBytes = 4 << 20
 
+// maxPCRJump es el salto de reloj a partir del cual se vuelve a anclar en vez
+// de respetarlo. Un segundo: por encima de eso, un empalme de material dejaría
+// el canal mudo todo ese rato esperando a que llegue "su" instante.
+const maxPCRJump = 1 * pcrClockHz
+
 // pcrOf extrae el PCR de un paquete TS de 188 bytes, en unidades de 27 MHz.
 //
 // Estructura: byte 3 bit 0x20 dice que hay campo de adaptación; byte 4 es su
@@ -29,6 +34,12 @@ const pcrProbeBytes = 4 << 20
 // 6..11 son 33 bits de base a 90 kHz, 6 de relleno y 9 de extensión a 27 MHz.
 func pcrOf(p []byte) (uint64, bool) {
 	if len(p) < 12 || p[0] != 0x47 {
+		return 0, false
+	}
+	// transport_error_indicator: el paquete viene marcado como corrupto por
+	// quien lo recibió antes que nosotros. Fiarse de su PCR sería anclar el
+	// reloj de toda la emisión a un valor basura.
+	if p[1]&0x80 != 0 {
 		return 0, false
 	}
 	if p[3]&0x20 == 0 { // sin campo de adaptación
@@ -69,6 +80,19 @@ func newPCRPacer(bootstrapRate float64) *pcrPacer {
 	return &pcrPacer{rate: bootstrapRate}
 }
 
+// rebase vuelve a anclar el reloj al instante actual conservando el eje de
+// bytes. Lo llama el bucle de emisión cuando decide no recuperar un desfase:
+// sin esto, el ancla seguiría siendo la vieja, el retraso continuaría metido en
+// cada objetivo y el emisor soltaría de golpe todos los bytes atrasados a
+// velocidad de cable — que es exactamente lo que ese freno existe para evitar.
+func (p *pcrPacer) rebase(now time.Time, bytes float64) {
+	if !p.started {
+		return
+	}
+	p.anchorWall, p.anchorPCR = now, p.lastPCR
+	p.lastBytes = bytes
+}
+
 // observe mira un trozo de flujo en busca de PCR. bytesBefore es la posición
 // del primer byte del trozo dentro del total emitido. Devuelve true si el trozo
 // traía al menos un PCR.
@@ -98,11 +122,16 @@ func (p *pcrPacer) observe(chunk []byte, bytesBefore float64, now time.Time) boo
 				p.rate = r
 			}
 		}
-		if dPCR <= 0 || dPCR > 10*pcrClockHz {
-			// El PCR ha dado un salto atrás (vuelta del contador de 33 bits,
-			// cada ~26 h) o un salto adelante enorme (corte de material). Se
-			// vuelve a anclar aquí en vez de intentar recuperar el desfase.
+		// discontinuity_indicator: el propio flujo avisa de que su reloj va a
+		// dar un salto. Es la señal explícita y hay que hacerle caso siempre.
+		roto := chunk[off+3]&0x20 != 0 && chunk[off+4] > 0 && chunk[off+5]&0x80 != 0
+		if roto || dPCR <= 0 || dPCR > maxPCRJump {
+			// Salto atrás (vuelta del contador de 33 bits, cada ~26 h) o salto
+			// adelante (material empalmado, publicidad insertada, un ffmpeg que
+			// rearranca con otro reloj). Se vuelve a anclar aquí: intentar
+			// respetar el salto dejaría el canal mudo justo ese tiempo.
 			p.anchorWall, p.anchorPCR = now, v
+			p.lastBytes = pos
 		}
 		p.lastPCR, p.lastBytes = v, pos
 		visto = true

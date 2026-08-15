@@ -11,7 +11,7 @@ SIGHUP.
 | | |
 |---|---|
 | **[`mcast-dup`](#mcast-dup)** | Duplicates: joins one group and forwards every datagram as-is to one or more different groups, without re-encoding. |
-| **[`mcast-send`](#mcast-send)** | Emits: sends a file, standard input or a generated pattern to a group, at whatever bitrate you ask for. |
+| **[`mcast-send`](#mcast-send)** | Emits: sends a file, the output of an external command, standard input or a generated pattern, with optional RTP and paced by the stream's own PCR clock. |
 
 ```
                     ┌──►  239.255.0.1:1234
@@ -254,7 +254,8 @@ Set it to 0 if you have channels that are legitimately quiet for hours.
 
 ## mcast-send
 
-Emits a multicast stream at the bitrate you ask for. Three possible sources:
+Emits a multicast stream, raw UDP or encapsulated in RTP, at the bitrate you ask
+for or at whatever the stream's own clock dictates. Four possible sources:
 
 ```sh
 # a TS file, looped
@@ -283,7 +284,7 @@ mcast-send -d 239.0.99.1:5000 -b 2M
 | `-loop-file` | true | restart the file when it ends |
 | `-iface`, `-ttl`, `-loop`, `-sndbuf`, `-stats`, `-logfile`, `-lang` | | as in `mcast-dup` |
 
-With neither `-f` nor `-stdin` it emits a **numbered pattern**: each datagram
+With none of `-f`, `-exec` or `-stdin` it emits a **numbered pattern**: each datagram
 carries its sequence number in the first 8 bytes, so at the other end you can
 check that none is missing, none is repeated and they arrive in order. That is
 what the repository's automated test uses.
@@ -302,11 +303,19 @@ nothing:
 [13:54:42] bars                950 pkt/s · tx   9.98 Mbps · 0 err · 0 rebase
 ```
 
-`rebase` counts how many times the clock had to be **rebased** because the
-source was not keeping up with the requested bitrate — a slow disk, ffmpeg
-taking a while to start, or simply a bitrate configured above what the material
-can give. A `rebase` that keeps climbing means you are asking for more than your
-source can deliver; the stream still goes out, but not at the rate you think.
+`rebase` counts how many times the clock had to be **rebased**: the anchor moved
+to the present instead of trying to make up the lag all at once. It happens when
+the source is not keeping up with the requested bitrate — a slow disk, ffmpeg
+taking a while to start, a bitrate configured above what the material can give —
+and also when the stream's PCR jumps.
+
+Catching up the hard way would be worse than the lag itself: it is the backlog
+going out at wire speed, exactly what blows the decoder's buffer. Hence the
+rebase.
+
+One `rebase` **per episode** is normal. A counter that keeps climbing means you
+are asking for more than your source can deliver; the stream still goes out, but
+not at the rate you think. The next log line carries the last one's offset.
 
 ### Other formats: `exec`
 
@@ -372,12 +381,28 @@ Measured on a TS whose PCR says 6 Mbps:
 
 It anchors to the stream's clock and interpolates between PCRs using the rate
 measured between the last two, so it does not accumulate drift however long the
-emission lasts. A counter wrap — every ~26 h — or a material cut is detected and
-re-anchored, instead of trying to catch up all at once with a burst.
+emission lasts. A counter wrap — every ~26 h — a material splice, or a
+discontinuity the stream declares itself is detected and re-anchored, instead of
+trying to catch up all at once with a burst.
+
+That last part matters more than it sounds, and it has a test: the suite stalls
+the source for 1.5 s in the middle of a 6 Mbps emission and measures the **peak**
+over 200 ms windows. If only the fixed-bitrate clock were re-anchored on resume
+and not the PCR one, the target would still be computed by the pacer against its
+old anchor, every turn of the loop would see itself late again, and it would
+never sleep:
+
+| | Peak | `rebase` |
+|---|---|---|
+| re-anchoring only the fixed-bitrate clock | 38.8 Mbps | 599 |
+| re-anchoring both | **6.2 Mbps** | **1** |
 
 If the stream carries no PCR (not TS, or none present), after 4 MB it warns and
 falls back to the configured bitrate, which is still needed as the initial
-estimate: there is no measured rate until the second PCR.
+estimate: there is no measured rate until the second PCR. That estimate comes
+from `defaults`, so a channel with `"bitrate": "pcr"` wants a number in
+`defaults` in the right ballpark — bootstrapping a 50 Mbps stream at 10 leaves
+the first few milliseconds in slow motion.
 
 It requires `size` to be a multiple of 188, otherwise the TS packets come out
 split and there is no PCR to read.
@@ -393,13 +418,24 @@ inside a 1500 MTU. Sequence and SSRC start random, as the standard requires.
 
 ### It is still not a muxer
 
-`mcast-send` chunks and paces; it does not parse the content. With `exec` it
-delegates the format to something that knows how, but on its own it does not do:
-RTP, FEC (SMPTE 2022), SRT/RIST, transcoding, or variable bitrate driven by the
-PCR. Ask for 10 Mbps from a TS that is really 6 and you will emit it 1.6× too
-fast and blow the decoder's buffer: the right bitrate is yours to set.
+`mcast-send` chunks, paces and encapsulates. Of the transport stream it reads
+only the adaptation field — just enough to find the PCR; it **does not parse the
+content**: it does not touch PSI/SI tables, does not rewrite PIDs or service
+IDs, does not re-encode and does not multiplex several programmes into one.
 
-That is why the default size is **1316 = 7 × 188**, a whole number of TS
+What it does **not** do, and what you need instead:
+
+| | |
+|---|---|
+| FEC (SMPTE 2022-1) or seamless protection (2022-7) | a dedicated gateway |
+| SRT, RIST, Zixi | `srt-live-transmit`, `ristsender` |
+| transcode, remux, rewrite PSI/SI | `ffmpeg`, `tsduck` — `exec` puts them right there |
+| IPv6, RTCP, retransmission | — |
+
+With `exec` it delegates the format to something that knows how. It brings the
+clock, the RTP header and the socket.
+
+The default size is **1316 = 7 × 188**, a whole number of TS
 packets. If the material looks like a transport stream — checked by looking for
 the `0x47` sync bytes — and the alignment does not add up, it says so:
 
@@ -498,7 +534,7 @@ own destination: the stream comes out crossed and duplicated.
 The cause is `IP_MULTICAST_ALL`, which defaults to 1: a wildcard-bound socket
 receives *every* group joined anywhere on the host that arrives on its port,
 not just the ones that socket joined. `mcast-dup` sets it to 0 (see
-[`control_linux.go`](control_linux.go)).
+[`internal/mcast/control_linux.go`](internal/mcast/control_linux.go)).
 
 What does **not** work as an alternative in Go is binding to the group instead
 of the wildcard: the `net` package rewrites any multicast bind address to
@@ -552,10 +588,13 @@ there and startup says so explicitly, per channel.
 - **Linux is the primary platform.** It builds and runs on Windows and
   macOS/BSD, but Windows has neither `SIGHUP` (no hot reload) nor the ability to
   filter by destination address (startup warns about it).
-- **What the tests do not reach.** The data path is covered — the suite brings
-  up sender, relay and receiver and checks that the numbered pattern arrives
-  complete, with no duplicates, no gaps and no mixing with another group — but
-  **SSM filtering at the network level** is not: proving that the switch does
+- **What the tests do not reach.** The data path is covered: the suite brings up
+  sender, relay and receiver over real sockets and checks that the numbered
+  pattern arrives complete, with no duplicates, no gaps and no mixing with
+  another group; that with `rtp` the datagrams carry their 12-byte header, an
+  intact payload and an unbroken sequence; and that a stalled source does not
+  turn into a burst. What **cannot** be tested in CI is
+  **SSM filtering at the network level**: proving that the switch does
   not even send us other senders' traffic needs IGMPv3 in the path, and that
   cannot be set up on a CI runner. What is verified is that the join happens
   and that the foreign sender does not reach the destination.

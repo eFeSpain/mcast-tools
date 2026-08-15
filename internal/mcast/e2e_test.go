@@ -7,6 +7,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -166,6 +169,195 @@ func TestEndToEndSendRelayReceive(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Errorf("%s no terminó tras cancelar el contexto", name)
 		}
+	}
+}
+
+// runSender con RTP y con PCR no se ejecutaba en ningún test: solo estaban
+// probadas las piezas por separado. Un off-by-one de una línea en el bucle
+// —escribir la cabecera sobre el payload, o emitir pkt[:n] en vez de
+// pkt[:head+n]— dejaba toda la suite en verde.
+func TestSenderEmitsRealRTPWithPCRPacing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: se salta la prueba con tráfico real")
+	}
+	ifi := multicastIface(t)
+
+	const (
+		group   = "239.79.7.7"
+		port    = 5081
+		size    = 7 * tsPacket // 1316
+		bitrate = 6_000_000
+	)
+
+	// Material con PCR de 6 Mbps, servido desde un fichero temporal.
+	ts := tsWithPCR(4000, 10, bitrate)
+	path := filepath.Join(t.TempDir(), "pcr.ts")
+	if err := os.WriteFile(path, ts, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rx := receiver(t, group, port, ifi)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := SendCfg{
+		Name: "rtp", Dest: fmt.Sprintf("%s:%d", group, port), Iface: ifi.Name,
+		TTL: 0, Loopback: true, Bitrate: bitrate, Size: size,
+		File: path, Loop: true, RTP: true, PCR: true,
+	}
+	go runSender(ctx, cfg, &stats{name: "rtp"}, log.New(io.Discard, "", 0))
+
+	buf := make([]byte, 2048)
+	var primera, ultima uint16
+	recibidos := 0
+	deadline := time.Now().Add(6 * time.Second)
+	for recibidos < 20 && time.Now().Before(deadline) {
+		rx.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, _, err := rx.ReadFrom(buf)
+		if err != nil {
+			break
+		}
+		// El datagrama tiene que ser cabecera + payload íntegro.
+		if n != rtpHeaderLen+size {
+			t.Fatalf("datagrama de %d bytes, quiero %d (12 de RTP + %d de payload)",
+				n, rtpHeaderLen+size, size)
+		}
+		if buf[0] != 0x80 || buf[1] != rtpPayloadTypeMP2T {
+			t.Fatalf("cabecera RTP mal formada: %#x %#x", buf[0], buf[1])
+		}
+		// Y el payload tiene que empezar donde empieza un paquete TS: si la
+		// cabecera se hubiera escrito encima, aquí no habría un 0x47.
+		if buf[rtpHeaderLen] != 0x47 {
+			t.Fatalf("el payload no empieza en un paquete TS: %#x", buf[rtpHeaderLen])
+		}
+		seq := uint16(buf[2])<<8 | uint16(buf[3])
+		if recibidos == 0 {
+			primera = seq
+		}
+		ultima = seq
+		recibidos++
+	}
+	cancel()
+
+	if recibidos < 20 {
+		t.Fatalf("recibidos %d datagramas de 20", recibidos)
+	}
+	if avance := ultima - primera; int(avance) != recibidos-1 {
+		t.Fatalf("la secuencia RTP avanzó %d en %d datagramas: hay huecos o repeticiones",
+			avance, recibidos)
+	}
+}
+
+// El hallazgo grave de la revisión de RTP/PCR, con un parón de verdad.
+//
+// Cuando la fuente se para y el emisor decide no recuperar el retraso, tiene
+// que re-anclar el reloj que MANDA. Si solo re-ancla el de bitrate fijo, el
+// objetivo lo sigue calculando el pacer de PCR sobre su ancla vieja, cada
+// vuelta del bucle vuelve a verse retrasada, no se duerme nunca y el retraso
+// acumulado sale de golpe a velocidad de cable.
+//
+// Se mide de las dos formas: el ritmo tras el parón y el número de re-anclajes.
+// El segundo es el testigo más limpio —con el fallo son miles, uno por vuelta.
+func TestSenderDoesNotBurstAfterAStall(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: se salta la prueba con tráfico real")
+	}
+	ifi := multicastIface(t)
+
+	const (
+		group   = "239.79.9.9"
+		port    = 5082
+		size    = 7 * tsPacket
+		bitrate = 6_000_000
+		parada  = 1500 * time.Millisecond
+	)
+
+	// La fuente es la entrada estándar, que es lo único que permite pararla a
+	// voluntad desde el test.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	viejo := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = viejo; r.Close() })
+
+	ts := tsWithPCR(24000, 10, bitrate) // ~4,5 MB, 6 s de material
+	corte := 300 << 10                  // 300 kB antes del parón: 0,4 s
+	go func() {
+		defer w.Close()
+		w.Write(ts[:corte])
+		time.Sleep(parada)
+		w.Write(ts[corte:]) // y a partir de aquí, tan rápido como acepte el pipe
+	}()
+
+	rx := receiver(t, group, port, ifi)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st := &stats{name: "stall"}
+	cfg := SendCfg{
+		Name: "stall", Dest: fmt.Sprintf("%s:%d", group, port), Iface: ifi.Name,
+		TTL: 0, Loopback: true, Bitrate: bitrate, Size: size,
+		Stdin: true, PCR: true,
+	}
+	go runSender(ctx, cfg, st, log.New(io.Discard, "", 0))
+
+	// Se anota la llegada de cada datagrama durante toda la prueba. No vale
+	// medir el ritmo medio: la ráfaga dura decenas de milisegundos y un
+	// promedio de un segundo se la traga. Lo que hace daño es el PICO, que es
+	// lo que desborda el búfer del decodificador.
+	type llegada struct {
+		t time.Time
+		n int
+	}
+	var llegadas []llegada
+	buf := make([]byte, 2048)
+	inicio := time.Now()
+	fin := inicio.Add(3200 * time.Millisecond)
+	for time.Now().Before(fin) {
+		rx.SetReadDeadline(fin)
+		n, _, _, err := rx.ReadFrom(buf)
+		if err != nil {
+			break
+		}
+		llegadas = append(llegadas, llegada{time.Now(), n})
+	}
+	cancel()
+
+	if len(llegadas) == 0 {
+		t.Fatal("no ha llegado nada: el emisor se ha quedado mudo")
+	}
+	// Sin pacing la fuente entera sale de golpe y luego hay silencio; con
+	// pacing el flujo sigue vivo al acabar la ventana.
+	if callado := fin.Sub(llegadas[len(llegadas)-1].t); callado > 300*time.Millisecond {
+		t.Errorf("el último datagrama llegó %v antes del final: la emisión se agotó de golpe", callado)
+	}
+
+	const vent = 200 * time.Millisecond
+	var pico float64
+	for i := range llegadas {
+		hasta := llegadas[i].t.Add(vent)
+		total := 0
+		for j := i; j < len(llegadas) && llegadas[j].t.Before(hasta); j++ {
+			total += llegadas[j].n
+		}
+		if r := float64(total) * 8 / vent.Seconds(); r > pico {
+			pico = r
+		}
+	}
+	reanclajes := atomic.LoadUint64(&st.drops)
+	t.Logf("%d datagramas; pico en %v: %.1f Mbps sobre %.1f nominales; %d re-anclajes",
+		len(llegadas), vent, pico/1e6, float64(bitrate)/1e6, reanclajes)
+
+	if pico > 3*bitrate {
+		t.Errorf("pico de %.1f Mbps sobre un nominal de %.1f: el parón ha salido como ráfaga",
+			pico/1e6, float64(bitrate)/1e6)
+	}
+	// Un parón necesita un re-anclaje, no miles: cada vuelta del bucle sin
+	// dormir es uno más.
+	if reanclajes > 10 {
+		t.Errorf("%d re-anclajes para un solo parón: el pacer de PCR no se está re-anclando", reanclajes)
 	}
 }
 

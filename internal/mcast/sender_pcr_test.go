@@ -5,32 +5,45 @@ import (
 	"time"
 )
 
+// tsPacketWithPCR construye un paquete TS de 188 bytes con el PCR indicado, en
+// unidades de 27 MHz.
+func tsPacketWithPCR(v uint64) []byte {
+	p := make([]byte, tsPacket)
+	p[0] = 0x47
+	p[1], p[2] = 0x01, 0x00 // PID 256
+	p[3] = 0x30             // campo de adaptación + payload
+	p[4] = 7                // longitud del campo
+	p[5] = 0x10             // PCR_flag
+	base, ext := v/300, v%300
+	p[6] = byte(base >> 25)
+	p[7] = byte(base >> 17)
+	p[8] = byte(base >> 9)
+	p[9] = byte(base >> 1)
+	p[10] = byte(base<<7) | 0x7E | byte(ext>>8)
+	p[11] = byte(ext)
+	return p
+}
+
+// pcrAt devuelve el PCR que corresponde a la posición `offset` de un flujo que
+// va al bitrate indicado.
+func pcrAt(offset int, bitrate float64) uint64 {
+	return uint64(float64(offset) * 8 / bitrate * pcrClockHz)
+}
+
 // tsWithPCR construye un transport stream sintético con PCR cada `cada`
 // paquetes, correspondiente a un flujo del bitrate indicado. Es lo que permite
 // comprobar el pacing sin depender de tener material real a mano.
 func tsWithPCR(packets, cada int, bitrate float64) []byte {
 	ts := make([]byte, packets*tsPacket)
 	for i := 0; i < packets; i++ {
-		p := ts[i*tsPacket:]
-		p[0] = 0x47
-		p[1], p[2] = 0x01, 0x00 // PID 256
+		p := ts[i*tsPacket : (i+1)*tsPacket]
 		if i%cada != 0 {
+			p[0] = 0x47
+			p[1], p[2] = 0x01, 0x00
 			p[3] = 0x10 // solo payload
 			continue
 		}
-		p[3] = 0x30 // campo de adaptación + payload
-		p[4] = 7    // longitud del campo
-		p[5] = 0x10 // PCR_flag
-		// El PCR que corresponde a este byte si el flujo va a `bitrate`.
-		segundos := float64(i*tsPacket) * 8 / bitrate
-		v := uint64(segundos * pcrClockHz)
-		base, ext := v/300, v%300
-		p[6] = byte(base >> 25)
-		p[7] = byte(base >> 17)
-		p[8] = byte(base >> 9)
-		p[9] = byte(base >> 1)
-		p[10] = byte(base<<7) | 0x7E | byte(ext>>8)
-		p[11] = byte(ext)
+		copy(p, tsPacketWithPCR(pcrAt(i*tsPacket, bitrate)))
 	}
 	return ts
 }
@@ -100,32 +113,79 @@ func TestPCRPacerLearnsTheRealBitrate(t *testing.T) {
 	}
 }
 
-// Un salto del reloj no puede provocar una ráfaga: ni la vuelta del contador de
-// 33 bits ni un corte de material.
-func TestPCRPacerSurvivesAClockJump(t *testing.T) {
+// Un salto del reloj no puede dejar el canal mudo ni provocar una ráfaga. Se
+// prueban las tres formas en que ocurre: el contador de 33 bits que da la
+// vuelta, el material empalmado que arranca con un PCR muy por delante, y la
+// discontinuidad que el propio flujo declara.
+//
+// El margen es estrecho a propósito: con uno ancho, este test pasaba aunque se
+// borrara entera la lógica de re-anclaje que le da nombre.
+func TestPCRPacerReanchorsOnAClockJump(t *testing.T) {
+	const bitrate = 8_000_000
+	// El PCR que le tocaría al paquete siguiente si el flujo continuara.
+	siguiente := pcrAt(200*tsPacket, bitrate)
+	casos := []struct {
+		nombre string
+		pcr    uint64
+	}{
+		{"el contador de 33 bits da la vuelta", 0},
+		{"material empalmado 30 s por delante", siguiente + 30*pcrClockHz},
+	}
+
+	for _, c := range casos {
+		// 10 segundos de reloj de pared desde el ancla, para que sin re-anclaje
+		// el error sea de segundos y el test no pueda pasar por casualidad.
+		p := newPCRPacer(bitrate / 8)
+		inicio := time.Now()
+		normal := tsWithPCR(200, 10, bitrate)
+		p.observe(normal, 0, inicio)
+		bytesYa := float64(len(normal))
+
+		ahora := inicio.Add(10 * time.Second)
+		p.observe(tsPacketWithPCR(c.pcr), bytesYa, ahora)
+
+		// Tras re-anclar, el instante del byte siguiente tiene que caer
+		// pegado a "ahora": un datagrama de 1316 B a 8 Mbps son 1,3 ms.
+		d := p.target(bytesYa + 1316).Sub(ahora)
+		if d < 0 || d > 50*time.Millisecond {
+			t.Errorf("%s: el objetivo cae a %v del salto; sin re-anclar sería de segundos", c.nombre, d)
+		}
+		if p.rate <= 0 || p.rate > 125_000_000 {
+			t.Errorf("%s: ritmo absurdo tras el salto: %.0f B/s", c.nombre, p.rate)
+		}
+	}
+}
+
+// La discontinuidad declarada por el flujo (discontinuity_indicator) hay que
+// respetarla aunque el salto de PCR sea pequeño: es la señal explícita.
+func TestPCRPacerHonoursTheDiscontinuityFlag(t *testing.T) {
 	p := newPCRPacer(1_000_000)
 	inicio := time.Now()
-
-	normal := tsWithPCR(20, 10, 8_000_000)
+	normal := tsWithPCR(200, 10, 8_000_000)
 	p.observe(normal, 0, inicio)
-	ritmoAntes := p.rate
+	bytesYa := float64(len(normal))
 
-	// Un PCR que retrocede: contador que ha dado la vuelta.
-	atras := make([]byte, tsPacket)
-	copy(atras, normal[:tsPacket]) // PCR = 0, muy por detrás del último
-	p.observe(atras, 1e6, inicio.Add(time.Second))
+	// Un paquete con el PCR que le tocaba —un salto tan pequeño que la
+	// heurística de maxPCRJump no lo ve— pero con la discontinuidad declarada.
+	roto := tsPacketWithPCR(pcrAt(200*tsPacket, 8_000_000))
+	roto[5] |= 0x80 // discontinuity_indicator
+	ahora := inicio.Add(5 * time.Second)
+	p.observe(roto, bytesYa, ahora)
 
-	if p.rate <= 0 || p.rate > 125_000_000 {
-		t.Fatalf("el salto del reloj ha dejado un ritmo absurdo: %.0f B/s", p.rate)
+	if d := p.target(bytesYa + 1316).Sub(ahora); d < 0 || d > 50*time.Millisecond {
+		t.Fatalf("no se ha re-anclado con la discontinuidad declarada: objetivo a %v", d)
 	}
-	if p.rate != ritmoAntes {
-		t.Logf("ritmo reajustado de %.0f a %.0f B/s tras el salto", ritmoAntes, p.rate)
+}
+
+// Un paquete marcado como corrupto no puede anclar el reloj de toda la emisión.
+func TestPCROfIgnoresCorruptPackets(t *testing.T) {
+	ts := tsWithPCR(1, 1, 8_000_000)
+	if _, ok := pcrOf(ts); !ok {
+		t.Fatal("el paquete de referencia debería llevar PCR")
 	}
-	// Y el objetivo siguiente no puede quedar en el pasado remoto ni en el
-	// futuro remoto: eso sería la ráfaga o el parón.
-	d := p.target(1e6 + 1316).Sub(inicio.Add(time.Second))
-	if d < -time.Second || d > time.Minute {
-		t.Fatalf("tras el salto, el próximo objetivo cae a %v del ancla", d)
+	ts[1] |= 0x80 // transport_error_indicator
+	if _, ok := pcrOf(ts); ok {
+		t.Fatal("se ha leído el PCR de un paquete marcado como corrupto")
 	}
 }
 
@@ -169,8 +229,16 @@ func TestRTPHeader(t *testing.T) {
 // SSRC: un receptor que ve reaparecer un SSRC conocido cree que es el mismo
 // flujo de antes.
 func TestRTPWritersStartDifferent(t *testing.T) {
+	// Con && bastaba con que uno de los dos fuera aleatorio: un SSRC constante
+	// pasaba el test sin que nadie se enterase. Cada campo, por separado.
 	a, b := newRTPWriter(), newRTPWriter()
-	if a.ssrc == b.ssrc && a.seq == b.seq {
-		t.Fatal("dos emisores arrancan idénticos: el SSRC y la secuencia deben ser aleatorios")
+	if a.ssrc == b.ssrc {
+		t.Errorf("dos emisores arrancan con el mismo SSRC (%#x): un receptor creerá que es el mismo flujo", a.ssrc)
+	}
+	if a.seq == b.seq {
+		t.Errorf("dos emisores arrancan con la misma secuencia (%d)", a.seq)
+	}
+	if a.ssrc == 0 {
+		t.Error("SSRC 0: no se ha inicializado")
 	}
 }

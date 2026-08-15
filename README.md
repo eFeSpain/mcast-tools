@@ -11,7 +11,7 @@ proceso y recarga en caliente con SIGHUP.
 | | |
 |---|---|
 | **[`mcast-dup`](#mcast-dup)** | Duplica: recibe un grupo y reenvía cada datagrama tal cual a uno o varios grupos distintos, sin recodificar. |
-| **[`mcast-send`](#mcast-send)** | Emite: manda un fichero, la entrada estándar o un patrón generado a un grupo, al bitrate que le pidas. |
+| **[`mcast-send`](#mcast-send)** | Emite: manda un fichero, la salida de una orden externa, la entrada estándar o un patrón generado, con RTP opcional y al ritmo que marque el PCR del propio flujo. |
 
 ```
                     ┌──►  239.255.0.1:1234
@@ -255,7 +255,8 @@ tocar nada.
 
 ## mcast-send
 
-Emite un flujo multicast al bitrate que le pidas. Tres orígenes posibles:
+Emite un flujo multicast, en UDP crudo o encapsulado en RTP, al bitrate que le
+pidas o al que marque el reloj del propio flujo. Cuatro orígenes posibles:
 
 ```sh
 # un fichero TS, en bucle
@@ -284,7 +285,7 @@ mcast-send -d 239.0.99.1:5000 -b 2M
 | `-loop-file` | true | volver a empezar el fichero al terminarlo |
 | `-iface`, `-ttl`, `-loop`, `-sndbuf`, `-stats`, `-logfile`, `-lang` | | como en `mcast-dup` |
 
-Sin `-f` ni `-stdin` emite un **patrón numerado**: cada datagrama lleva su
+Sin `-f`, `-exec` ni `-stdin` emite un **patrón numerado**: cada datagrama lleva su
 número de secuencia en los 8 primeros bytes, así que en el otro extremo se puede
 comprobar que no falta ninguno, que no se repiten y que llegan en orden. Es lo
 que usa la prueba automática del repositorio.
@@ -303,11 +304,20 @@ El resumen del emisor no lleva las columnas del relé, porque no recibe nada:
 [13:54:42] barras              950 pkt/s · tx   9.98 Mbps · 0 err · 0 rebase
 ```
 
-`rebase` cuenta las veces que hubo que **rebasar el reloj** porque la fuente no
-daba el bitrate pedido —un disco lento, ffmpeg tardando en arrancar, o
-sencillamente un bitrate configurado por encima de lo que el material da de
-sí—. Un `rebase` que sube constantemente significa que estás pidiendo más de lo
-que tu fuente puede entregar; el flujo sale igual, pero no al ritmo que crees.
+`rebase` cuenta las veces que hubo que **rebasar el reloj**: mover el ancla al
+momento actual en vez de intentar recuperar el desfase de golpe. Pasa cuando la
+fuente no da el bitrate pedido —un disco lento, ffmpeg tardando en arrancar, un
+bitrate configurado por encima de lo que el material da de sí— y también cuando
+el PCR del flujo pega un salto.
+
+Recuperar el retraso a lo bruto sería peor que el retraso: son los bytes
+atrasados saliendo de golpe a velocidad de cable, justo lo que desborda el búfer
+del decodificador. Por eso se rebasa.
+
+Un `rebase` **por episodio** es lo normal. Un contador que sube sin parar
+significa que estás pidiendo más de lo que tu fuente puede entregar; el flujo
+sale igual, pero no al ritmo que crees. La línea siguiente del log trae el
+desfase del último.
 
 ### Otros formatos: `exec`
 
@@ -372,13 +382,27 @@ Medido sobre un TS cuyo PCR dice 6 Mbps:
 
 Se ancla al reloj del flujo e interpola entre PCR con el ritmo medido entre los
 dos últimos, así que no acumula deriva por mucho que dure la emisión. Un salto
-del contador —da la vuelta cada ~26 h— o un corte de material se detectan y se
-vuelve a anclar, en vez de intentar recuperar el desfase de golpe con una
-ráfaga.
+del contador —da la vuelta cada ~26 h—, un empalme de material o una
+discontinuidad declarada por el propio flujo se detectan y se vuelve a anclar,
+en vez de intentar recuperar el desfase de golpe con una ráfaga.
+
+Eso último importa más de lo que parece, y tiene su prueba: la suite para la
+fuente 1,5 s en mitad de una emisión de 6 Mbps y mide el **pico** en ventanas de
+200 ms. Si al reanudar solo se re-anclara el reloj de bitrate fijo y no el del
+PCR, el objetivo lo seguiría calculando el pacer sobre su ancla vieja, cada
+vuelta del bucle volvería a verse retrasada y no se dormiría nunca:
+
+| | Pico | `rebase` |
+|---|---|---|
+| re-anclando solo el reloj de bitrate fijo | 38,8 Mbps | 599 |
+| re-anclando los dos | **6,2 Mbps** | **1** |
 
 Si el flujo no trae PCR (no es TS, o no los lleva), tras 4 MB se avisa y se
 vuelve al bitrate configurado, que sigue haciendo falta como estimación
-inicial: hasta el segundo PCR no hay ritmo medido.
+inicial: hasta el segundo PCR no hay ritmo medido. Esa estimación sale de
+`defaults`, así que en un canal con `"bitrate": "pcr"` conviene que `defaults`
+lleve un número por dónde ande el material —arrancar a 10 Mbps un flujo de 50
+deja los primeros milisegundos a cámara lenta—.
 
 Exige que `size` sea múltiplo de 188, porque si no los paquetes TS salen
 partidos y no hay PCR que leer.
@@ -396,13 +420,24 @@ manda la norma.
 
 ### Sigue sin ser un multiplexor
 
-`mcast-send` trocea y pacea; no parsea el contenido. Con `exec` delega el
-formato en quien sabe, pero él mismo no hace: ni RTP, ni FEC (SMPTE 2022), ni
-SRT/RIST, ni transcodificación, ni bitrate variable guiado por el PCR. Si le
-pides 10 Mbps a un TS que en realidad son 6, lo emitirás 1,6 veces más rápido y
-le reventarás el búfer al decodificador: el bitrate correcto lo pones tú.
+`mcast-send` trocea, pacea y encapsula. Del transport stream solo lee el campo
+de adaptación —lo justo para encontrar el PCR—; **no parsea el contenido**: no
+toca las tablas PSI/SI, no reescribe PID ni service IDs, no recodifica y no
+multiplexa varios programas en uno.
 
-Por eso el tamaño por defecto es **1316 = 7 × 188**, un número entero de
+Lo que **no** hace, y para lo que necesitas otra cosa:
+
+| | |
+|---|---|
+| FEC (SMPTE 2022-1) o *seamless protection* (2022-7) | un gateway dedicado |
+| SRT, RIST, Zixi | `srt-live-transmit`, `ristsender` |
+| transcodificar, remultiplexar, reescribir PSI/SI | `ffmpeg`, `tsduck` — con `exec` los tienes delante |
+| IPv6, RTCP, *retransmission* | — |
+
+Con `exec` delega el formato en quien sabe hacerlo. Él pone el reloj, la
+cabecera RTP y el socket.
+
+El tamaño por defecto es **1316 = 7 × 188**, un número entero de
 paquetes TS. Si el material parece un transport stream —se comprueba mirando los
 bytes de sincronismo `0x47`— y la alineación no cuadra, se avisa:
 
@@ -499,7 +534,7 @@ destino: el flujo sale cruzado y duplicado.
 La causa es `IP_MULTICAST_ALL`, que vale 1 por defecto: un socket bindeado al
 comodín recibe *todos* los grupos unidos en la máquina que lleguen a su puerto,
 no solo los que ese socket unió. `mcast-dup` lo pone a 0 (ver
-[`control_linux.go`](control_linux.go)).
+[`internal/mcast/control_linux.go`](internal/mcast/control_linux.go)).
 
 Lo que **no** sirve como alternativa en Go es bindear al grupo en vez de al
 comodín: el paquete `net` reescribe cualquier bind multicast a `0.0.0.0`
@@ -551,13 +586,15 @@ arranque lo avisa explícitamente por canal.
 - **Linux es la plataforma principal.** Compila y funciona en Windows y
   macOS/BSD, pero en Windows no existe `SIGHUP` (no hay recarga en caliente) ni
   se puede filtrar por dirección de destino (el arranque lo avisa).
-- **Lo que las pruebas no alcanzan.** El camino de datos sí está cubierto —la
-  suite levanta emisor, relé y receptor y comprueba que el patrón numerado
-  llega entero, sin duplicados, sin huecos y sin mezclarse con otro grupo—,
-  pero el **filtrado SSM a nivel de red** no: comprobar que el switch no nos
-  manda siquiera el tráfico de otros emisores exige IGMPv3 en el camino y no se
-  puede montar en un runner de CI. Lo que sí se verifica es que el join se hace
-  y que el emisor ajeno no llega al destino.
+- **Lo que las pruebas no alcanzan.** El camino de datos sí está cubierto: la
+  suite levanta emisor, relé y receptor sobre sockets de verdad y comprueba que
+  el patrón numerado llega entero, sin duplicados, sin huecos y sin mezclarse
+  con otro grupo; que con `rtp` los datagramas salen con su cabecera de 12
+  bytes, el payload intacto y la secuencia sin saltos; y que un parón de la
+  fuente no se convierte en una ráfaga. Lo que **no** se puede probar en CI es
+  el **filtrado SSM a nivel de red**: comprobar que el switch no nos manda
+  siquiera el tráfico de otros emisores exige IGMPv3 en el camino. Lo que sí se
+  verifica es que el join se hace y que el emisor ajeno no llega al destino.
 
 ## Licencia
 
