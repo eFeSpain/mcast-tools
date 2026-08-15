@@ -257,8 +257,12 @@ Set it to 0 if you have channels that are legitimately quiet for hours.
 Emits a multicast stream at the bitrate you ask for. Three possible sources:
 
 ```sh
-# a file, looped
+# a TS file, looped
 mcast-send -d 239.0.10.1:5000 -f bars.ts -b 10M -iface eth0
+
+# any other format: ffmpeg remuxes it and mcast-send supervises it
+mcast-send -d 239.0.10.1:5000 -b 8M \
+           -exec "ffmpeg -v quiet -re -i input.mp4 -c copy -f mpegts -"
 
 # whatever arrives on standard input
 ffmpeg -re -i input.mp4 -c copy -f mpegts - | mcast-send -d 239.0.10.1:5000 -stdin -b 8M
@@ -272,6 +276,7 @@ mcast-send -d 239.0.99.1:5000 -b 2M
 | `-d` | — | destination `GROUP:PORT` (required) |
 | `-f` | — | file to emit |
 | `-stdin` | false | read from standard input |
+| `-exec` | — | run this command and emit its standard output |
 | `-b` | 10M | bitrate: bits/s or with a suffix (`10M`, `512k`, `2.5M`) |
 | `-size` | 1316 | payload bytes per datagram (1316 = 7 TS packets) |
 | `-loop-file` | true | restart the file when it ends |
@@ -302,14 +307,52 @@ taking a while to start, or simply a bitrate configured above what the material
 can give. A `rebase` that keeps climbing means you are asking for more than your
 source can deliver; the stream still goes out, but not at the rate you think.
 
-### It is a byte pump, not a muxer
+### Other formats: `exec`
 
-`mcast-send` chunks and paces; it parses nothing. That covers the normal IPTV
-case — MPEG-TS over raw UDP — but it is worth knowing what it does **not** do:
-no RTP, no FEC (SMPTE 2022), no SRT/RIST, no remuxing, no transcoding, no
-variable bitrate driven by the PCR. Ask for 10 Mbps from a TS that is really 6
-and you will emit it 1.6× too fast and blow the decoder's buffer: the right
-bitrate is yours to set.
+UDP multicast carries MPEG-TS. An MP4, an MKV or a MOV **cannot be emitted
+as-is**: they would go out at their bitrate, with zero errors in the
+statistics, and no decoder could read them. So if you hand one over, it is
+rejected with the exact command to fix it:
+
+```
+channel 'movie': /srv/movie.mp4 is MP4/MOV, and UDP multicast carries MPEG-TS.
+                 Remux it without re-encoding:
+                 ffmpeg -i /srv/movie.mp4 -c copy -f mpegts /srv/movie.ts
+```
+
+And so you do not have to prepare the material by hand, `exec` runs that
+conversion **under supervision**:
+
+```json
+{ "name": "movie", "dest": "239.0.10.3:5000", "bitrate": "6M",
+  "exec": "ffmpeg -v quiet -re -i /srv/media/movie.mp4 -c copy -f mpegts -" }
+```
+
+The command lives and dies with the channel: if it crashes, the channel goes
+down with it and is retried like any other; if you stop the channel, the command
+is killed — verified that no orphan processes are left behind. And when it dies,
+the log carries **its last error output**, which is what you need to know what
+happened:
+
+```
+[movie] relay down (payload: the source command failed (exit status 1);
+        its last output: No such file or directory); retrying in 3s
+```
+
+Each channel spawns its own, so this **does scale to multi-channel**, unlike
+`-stdin`, which only one channel per process can read from.
+
+The command does not go through a shell: it is split honouring quotes and
+executed directly. No `*` expansion, no pipes, no `&&` — and no injection from
+the config file either.
+
+### It is still not a muxer
+
+`mcast-send` chunks and paces; it does not parse the content. With `exec` it
+delegates the format to something that knows how, but on its own it does not do:
+RTP, FEC (SMPTE 2022), SRT/RIST, transcoding, or variable bitrate driven by the
+PCR. Ask for 10 Mbps from a TS that is really 6 and you will emit it 1.6× too
+fast and blow the decoder's buffer: the right bitrate is yours to set.
 
 That is why the default size is **1316 = 7 × 188**, a whole number of TS
 packets. If the material looks like a transport stream — checked by looking for
@@ -349,6 +392,7 @@ bitrate, missing file, two channels aimed at the same destination).
 | `file` | channel | — | file to emit |
 | `loop` | channel | true | restart the file when it ends |
 | `stdin` | channel | false | read from standard input |
+| `exec` | channel | — | external command whose standard output is emitted |
 | `bitrate` | both | `10M` | bits/s or with a suffix |
 | `size` | both | 1316 | payload bytes per datagram |
 | `iface`, `ttl`, `loopback`, `sndbuf`, `stats` | both | | as in the relay |

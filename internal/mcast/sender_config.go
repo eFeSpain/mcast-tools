@@ -8,6 +8,8 @@ import (
 	"math"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,10 +33,14 @@ type SendDefaults struct {
 }
 
 type SendChannelCfg struct {
-	Name     string `json:"name"`
-	Dest     string `json:"dest"`
-	File     string `json:"file"`
-	Loop     *bool  `json:"loop"`
+	Name string `json:"name"`
+	Dest string `json:"dest"`
+	File string `json:"file"`
+	Loop *bool  `json:"loop"`
+	// Exec es una orden externa cuya salida estándar se emite: normalmente un
+	// ffmpeg que remultiplexa cualquier formato a MPEG-TS. Vive y muere con el
+	// canal, así que se reinicia sola si se cae.
+	Exec     string `json:"exec"`
 	Stdin    bool   `json:"stdin"`
 	Bitrate  string `json:"bitrate"`
 	Size     int    `json:"size"`
@@ -61,6 +67,7 @@ type SendCfg struct {
 	Size     int // bytes de payload por datagrama
 	File     string
 	Loop     bool // repetir el fichero al llegar al final
+	Exec     string
 	Stdin    bool
 }
 
@@ -75,6 +82,8 @@ func (e SendCfg) describe() string {
 		if e.Loop {
 			origen += " " + txt.logSendLooping
 		}
+	case e.Exec != "":
+		origen = e.Exec
 	case e.Stdin:
 		origen = "stdin"
 	}
@@ -111,6 +120,52 @@ func looksLikeTS(path string) bool {
 		}
 	}
 	return true
+}
+
+// detectContainer reconoce por los primeros bytes los contenedores que NO
+// pueden viajar por UDP multicast tal cual. Devuelve "" si no reconoce nada.
+//
+// Solo se rechaza lo que se identifica con certeza: emitir un fichero binario
+// cualquiera es un uso legítimo (datos, un patrón propio, material ya
+// preparado), y no se puede exigir que todo sea TS. Pero un MP4 emitido a pelo
+// no lo lee nadie, y hasta ahora salía sin un solo aviso.
+func detectContainer(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := make([]byte, 16)
+	n, _ := io.ReadFull(f, h)
+	if n < 12 {
+		return ""
+	}
+	switch {
+	case string(h[4:8]) == "ftyp":
+		return "MP4/MOV"
+	case h[0] == 0x1A && h[1] == 0x45 && h[2] == 0xDF && h[3] == 0xA3:
+		return "Matroska/WebM"
+	case string(h[0:4]) == "RIFF" && string(h[8:12]) == "AVI ":
+		return "AVI"
+	case string(h[0:4]) == "RIFF" && string(h[8:12]) == "WAVE":
+		return "WAV"
+	case h[0] == 0x00 && h[1] == 0x00 && h[2] == 0x01 && h[3] == 0xBA:
+		return "MPEG-PS (VOB)"
+	case string(h[0:3]) == "FLV":
+		return "FLV"
+	case string(h[0:4]) == "OggS":
+		return "Ogg"
+	case h[0] == 0x30 && h[1] == 0x26 && h[2] == 0xB2 && h[3] == 0x75:
+		return "ASF/WMV"
+	case string(h[0:3]) == "ID3":
+		return "MP3"
+	}
+	return ""
+}
+
+// remuxTarget propone el nombre de salida para la orden de ffmpeg del aviso.
+func remuxTarget(path string) string {
+	return strings.TrimSuffix(path, filepath.Ext(path)) + ".ts"
 }
 
 // maxBitrate es un tope de cordura: 100 Gbps. Sirve sobre todo para que el
@@ -269,9 +324,30 @@ func resolveSendChannels(c SendConfig, statsFlag float64) sendResolved {
 			reject(txt.warnBadBitrate, name, rate)
 			continue
 		}
-		if ch.File != "" && ch.Stdin {
-			reject(txt.warnFileAndStdin, name)
+		// Fichero, stdin y exec son excluyentes: con dos a la vez no hay forma
+		// de saber cuál gana, y elegir por el programa sería adivinar.
+		fuentes := 0
+		for _, usada := range []bool{ch.File != "", ch.Stdin, ch.Exec != ""} {
+			if usada {
+				fuentes++
+			}
+		}
+		if fuentes > 1 {
+			reject(txt.warnManySources, name)
 			continue
+		}
+		if ch.Exec != "" {
+			args := splitCommand(ch.Exec)
+			if len(args) == 0 {
+				reject(txt.warnExecMissing, name, ch.Exec, txt.errExecEmpty)
+				continue
+			}
+			// Se comprueba aquí que el programa existe: si no, el canal
+			// arrancaría y se caería en bucle cada tres segundos.
+			if _, err := exec.LookPath(args[0]); err != nil {
+				reject(txt.warnExecMissing, name, args[0], err)
+				continue
+			}
 		}
 		// Solo un canal puede leer de stdin: dos se repartirían trozos alternos
 		// de la misma entrada y los dos flujos saldrían corruptos, cada uno a su
@@ -291,6 +367,13 @@ func resolveSendChannels(c SendConfig, statsFlag float64) sendResolved {
 			}
 			if fi.Size() == 0 {
 				reject(txt.warnEmptyFile, name, ch.File)
+				continue
+			}
+			// Un contenedor reconocible que no es TS no puede emitirse tal cual:
+			// saldría a su bitrate, con cero errores, y no habría decodificador
+			// capaz de leerlo. Antes pasaba sin un solo aviso.
+			if c := detectContainer(ch.File); c != "" {
+				reject(txt.warnNotTSFile, name, ch.File, c, ch.File, remuxTarget(ch.File))
 				continue
 			}
 			// Si es un TS, la alineación importa y romperla no da error en
@@ -314,7 +397,7 @@ func resolveSendChannels(c SendConfig, statsFlag float64) sendResolved {
 		e := SendCfg{
 			Name: name, Dest: da.String(), Iface: d.Iface, TTL: ttl,
 			Loopback: dLoopback, Sndbuf: d.Sndbuf, Bitrate: bps, Size: size,
-			File: ch.File, Loop: loop, Stdin: ch.Stdin,
+			File: ch.File, Loop: loop, Exec: ch.Exec, Stdin: ch.Stdin,
 		}
 		if ch.Iface != "" {
 			e.Iface = ch.Iface
@@ -349,11 +432,11 @@ func sendCompatible(cand SendCfg, with []SendCfg) bool {
 
 // sendConfigFromFlags convierte el modo flags en una SendConfig de un canal,
 // para que pase por las mismas validaciones que el modo daemon.
-func sendConfigFromFlags(dst, file string, stdin bool, bitrate string, size int,
+func sendConfigFromFlags(dst, file, execCmd string, stdin bool, bitrate string, size int,
 	iface string, ttl int, loopback bool, sndbuf int) SendConfig {
 	loop := true
 	return SendConfig{Channels: []SendChannelCfg{{
-		Name: "cli", Dest: strings.TrimSpace(dst), File: file, Stdin: stdin,
+		Name: "cli", Dest: strings.TrimSpace(dst), File: file, Exec: strings.TrimSpace(execCmd), Stdin: stdin,
 		Loop: &loop, Bitrate: bitrate, Size: size, Iface: iface,
 		TTL: &ttl, Loopback: &loopback, Sndbuf: &sndbuf,
 	}}}

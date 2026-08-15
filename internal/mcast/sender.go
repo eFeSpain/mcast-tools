@@ -10,6 +10,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -128,8 +131,162 @@ func (s *patternSource) next(buf []byte) (int, error) {
 
 func (s *patternSource) Close() error { return nil }
 
-func newPayload(e SendCfg) (payload, error) {
+// ─── Fuente por orden externa ────────────────────────────────────────────────
+
+// splitCommand parte una línea de órdenes en argumentos respetando comillas.
+// No se pasa por un intérprete a propósito: nada de sh -c. Así no hay
+// expansión ni inyección desde un fichero de configuración, y funciona igual en
+// Windows, donde no hay sh.
+func splitCommand(line string) []string {
+	var args []string
+	var cur strings.Builder
+	var quote rune
+	escrito := false
+	for _, r := range line {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote = r
+			escrito = true
+		case r == ' ' || r == '\t':
+			if cur.Len() > 0 || escrito {
+				args = append(args, cur.String())
+				cur.Reset()
+				escrito = false
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 || escrito {
+		args = append(args, cur.String())
+	}
+	return args
+}
+
+// tail guarda las últimas líneas de la salida de error de la orden. Sin esto,
+// un ffmpeg que muere lo hace sin decir por qué: se ve el canal caer y
+// reintentarse cada 3 s sin una sola pista de qué le pasa.
+type tail struct {
+	mu    sync.Mutex
+	lines []string
+	max   int
+}
+
+func (t *tail) add(s string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lines = append(t.lines, s)
+	if len(t.lines) > t.max {
+		t.lines = t.lines[len(t.lines)-t.max:]
+	}
+}
+
+func (t *tail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Join(t.lines, " | ")
+}
+
+// execSource emite lo que escriba en su salida estándar una orden externa,
+// normalmente ffmpeg. La orden vive y muere con el canal: si se cae, el canal
+// se cae con ella y supervise la vuelve a levantar; si se para el canal, se
+// mata la orden.
+//
+// Es lo que hace que cualquier formato sea una entrada de primera clase sin
+// meter códecs aquí dentro, y sin el límite de un solo stdin por proceso.
+type execSource struct {
+	cmd    *exec.Cmd
+	out    io.ReadCloser
+	r      *bufio.Reader
+	stderr *tail
+	waited bool
+}
+
+func startExec(ctx context.Context, line string) (*execSource, error) {
+	args := splitCommand(line)
+	if len(args) == 0 {
+		return nil, errors.New(txt.errExecEmpty)
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// Si el contexto se cancela, no se puede esperar indefinidamente a que la
+	// orden cierre sus tuberías: se le da un margen y luego se la mata.
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	errPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	s := &execSource{cmd: cmd, out: out, r: bufio.NewReaderSize(out, 1<<20),
+		stderr: &tail{max: 5}}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	// La salida de error no se vuelca al log —ffmpeg escribe ahí su progreso y
+	// lo inundaría—, pero se guardan las últimas líneas para poder explicarlo
+	// si la orden muere.
+	go func() {
+		sc := bufio.NewScanner(errPipe)
+		for sc.Scan() {
+			if t := strings.TrimSpace(sc.Text()); t != "" {
+				s.stderr.add(t)
+			}
+		}
+	}()
+	return s, nil
+}
+
+func (s *execSource) next(buf []byte) (int, error) {
+	n, err := io.ReadFull(s.r, buf)
+	switch err {
+	case nil:
+		return n, nil
+	case io.ErrUnexpectedEOF:
+		return n, nil // último trozo antes de que la orden termine
+	case io.EOF:
+		return 0, s.finish()
+	default:
+		return n, err
+	}
+}
+
+// finish traduce el final de la orden: salir con código 0 es haber terminado el
+// material, y cualquier otra cosa es una caída que hay que reintentar y, sobre
+// todo, explicar.
+func (s *execSource) finish() error {
+	err := s.wait()
+	if err == nil {
+		return io.EOF
+	}
+	return fmt.Errorf(txt.errExecFailed, err, s.stderr.String())
+}
+
+func (s *execSource) wait() error {
+	if s.waited {
+		return nil
+	}
+	s.waited = true
+	return s.cmd.Wait()
+}
+
+func (s *execSource) Close() error {
+	s.out.Close()
+	s.wait()
+	return nil
+}
+
+func newPayload(ctx context.Context, e SendCfg) (payload, error) {
 	switch {
+	case e.Exec != "":
+		return startExec(ctx, e.Exec)
 	case e.File != "":
 		return openFileLoop(e.File, e.Loop)
 	case e.Stdin:
@@ -150,7 +307,7 @@ func runSender(ctx context.Context, e SendCfg, st *stats, errl *log.Logger) erro
 		return err
 	}
 
-	src, err := newPayload(e)
+	src, err := newPayload(ctx, e)
 	if err != nil {
 		return fmt.Errorf(txt.errPayload, err)
 	}

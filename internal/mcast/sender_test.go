@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -93,7 +95,10 @@ func TestSenderRejectsUnusableChannels(t *testing.T) {
 		{"destino sin puerto", SendChannelCfg{Name: "a", Dest: "239.0.10.1:0"}, "no port"},
 		{"bitrate inválido", SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", Bitrate: "diez megas"}, "invalid bitrate"},
 		{"tamaño inservible", SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", Size: 4}, "unusable datagram size"},
-		{"fichero y stdin", SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", File: real, Stdin: true}, "both a file and stdin"},
+		{"fichero y stdin", SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", File: real, Stdin: true}, "more than one source"},
+		{"fichero y exec", SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", File: real, Exec: "ffmpeg -i x -f mpegts -"}, "more than one source"},
+		{"exec inexistente", SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", Exec: "no-existe-este-programa-xyz -f -"}, "cannot run"},
+		{"exec vacío", SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", Exec: "   "}, "cannot run"},
 		{"fichero que no existe", SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", File: filepath.Join(dir, "no")}, "cannot read"},
 		{"ttl fuera de rango", SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", TTL: ptrInt(300)}, "out of range"},
 	}
@@ -169,13 +174,13 @@ func TestSenderAutomaticNameComesFromDest(t *testing.T) {
 func TestSenderFlagsModeMatchesDaemonValidation(t *testing.T) {
 	useLang(t, langEN)
 	// Un destino imposible tiene que rechazarse igual que en el JSON.
-	r := resolveSendChannels(sendConfigFromFlags("basura", "", false, "10M", 1316, "", 8, true, 0), 10)
+	r := resolveSendChannels(sendConfigFromFlags("basura", "", "", false, "10M", 1316, "", 8, true, 0), 10)
 	if len(r.channels) != 0 {
 		t.Fatal("destino inválido aceptado en modo flags")
 	}
 
 	// Y uno bueno tiene que conservar las opciones.
-	r = resolveSendChannels(sendConfigFromFlags("239.0.10.1:5000", "", true, "512k", 940, "10.30.0.5", 3, false, 1<<16), 10)
+	r = resolveSendChannels(sendConfigFromFlags("239.0.10.1:5000", "", "", true, "512k", 940, "10.30.0.5", 3, false, 1<<16), 10)
 	if len(r.channels) != 1 {
 		t.Fatalf("canal válido rechazado: %v", r.warns)
 	}
@@ -317,6 +322,172 @@ func TestKeptChannelSurvivesWhenItDoesNotCollide(t *testing.T) {
 
 	if sendNames(desired) != "a,b" {
 		t.Fatalf("canales = %q, quiero conservar también \"b\"", sendNames(desired))
+	}
+}
+
+// ─── Formatos que no pueden viajar por UDP ───────────────────────────────────
+
+func TestDetectContainer(t *testing.T) {
+	dir := t.TempDir()
+	escribe := func(name string, b []byte) string {
+		p := filepath.Join(dir, name)
+		relleno := append(b, make([]byte, 64)...)
+		if err := os.WriteFile(p, relleno, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	casos := map[string][]byte{
+		"MP4/MOV":       append([]byte{0, 0, 0, 0x20}, []byte("ftypisom")...),
+		"Matroska/WebM": {0x1A, 0x45, 0xDF, 0xA3},
+		"AVI":           append([]byte("RIFF\x00\x00\x00\x00"), []byte("AVI ")...),
+		"MPEG-PS (VOB)": {0x00, 0x00, 0x01, 0xBA},
+		"ASF/WMV":       {0x30, 0x26, 0xB2, 0x75},
+	}
+	i := 0
+	for want, magic := range casos {
+		i++
+		if got := detectContainer(escribe(fmt.Sprintf("f%d.bin", i), magic)); got != want {
+			t.Errorf("detectContainer(%s) = %q, quiero %q", want, got, want)
+		}
+	}
+	// Un TS y un binario cualquiera no son contenedores reconocibles: se emiten.
+	if got := detectContainer(tsFile(t, 4, 0)); got != "" {
+		t.Errorf("un TS se ha tomado por %q", got)
+	}
+	if got := detectContainer(escribe("raw.bin", []byte{1, 2, 3, 4})); got != "" {
+		t.Errorf("un binario cualquiera se ha tomado por %q", got)
+	}
+}
+
+// Un MP4 emitido a pelo salía a su bitrate, con cero errores, y no lo leía
+// nadie. Ahora se rechaza y se da la orden exacta para arreglarlo.
+func TestRejectsNonTSContainerWithARemuxHint(t *testing.T) {
+	useLang(t, langEN)
+	dir := t.TempDir()
+	mp4 := filepath.Join(dir, "peli.mp4")
+	body := append(append([]byte{0, 0, 0, 0x20}, []byte("ftypisom")...), make([]byte, 4096)...)
+	if err := os.WriteFile(mp4, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := resolveSendChannels(sendCfg(SendChannelCfg{Name: "a", Dest: "239.0.10.1:5000", File: mp4}), 10)
+
+	if len(r.channels) != 0 {
+		t.Fatal("un MP4 aceptado: emitiría basura sin que nadie lo note")
+	}
+	aviso := strings.Join(r.warns, " ")
+	for _, quiero := range []string{"MP4/MOV", "MPEG-TS", "ffmpeg -i", "-c copy -f mpegts", "peli.ts"} {
+		if !strings.Contains(aviso, quiero) {
+			t.Errorf("el aviso no contiene %q:\n%s", quiero, aviso)
+		}
+	}
+}
+
+// ─── Orden externa como fuente ───────────────────────────────────────────────
+
+func TestSplitCommand(t *testing.T) {
+	casos := []struct {
+		in   string
+		want []string
+	}{
+		{"ffmpeg -i x.mp4 -f mpegts -", []string{"ffmpeg", "-i", "x.mp4", "-f", "mpegts", "-"}},
+		{`ffmpeg -i "/srv/con espacios/x.mp4" -c copy`, []string{"ffmpeg", "-i", "/srv/con espacios/x.mp4", "-c", "copy"}},
+		{"  ffmpeg   -i    x   ", []string{"ffmpeg", "-i", "x"}},
+		{`echo 'una cosa'`, []string{"echo", "una cosa"}},
+		{`echo ""`, []string{"echo", ""}}, // argumento vacío explícito
+		{"", nil},
+		{"   ", nil},
+	}
+	for _, c := range casos {
+		got := splitCommand(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("splitCommand(%q) = %q, quiero %q", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("splitCommand(%q)[%d] = %q, quiero %q", c.in, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+// helperCommand se llama a sí mismo: es la forma portable de tener una orden
+// externa de verdad en un test, sin depender de que exista cat, head o ffmpeg.
+func helperCommand(bytes, exit int) string {
+	return fmt.Sprintf("%s -test.run=TestExecHelperProcess -- %d %d", os.Args[0], bytes, exit)
+}
+
+func TestExecHelperProcess(t *testing.T) {
+	args := os.Args
+	var rest []string
+	for i, a := range args {
+		if a == "--" {
+			rest = args[i+1:]
+			break
+		}
+	}
+	if len(rest) != 2 {
+		t.Skip("no es una invocación de ayuda")
+	}
+	n, _ := strconv.Atoi(rest[0])
+	code, _ := strconv.Atoi(rest[1])
+	os.Stdout.Write(make([]byte, n))
+	if code != 0 {
+		fmt.Fprintln(os.Stderr, "el material no se puede abrir")
+		os.Exit(code)
+	}
+	os.Exit(0)
+}
+
+func TestExecSourceReadsTheCommandOutput(t *testing.T) {
+	src, err := startExec(context.Background(), helperCommand(4096, 0))
+	if err != nil {
+		t.Fatalf("arrancando la orden: %v", err)
+	}
+	defer src.Close()
+
+	buf := make([]byte, 1316)
+	total := 0
+	for {
+		n, err := src.next(buf)
+		total += n
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("leyendo: %v", err)
+		}
+	}
+	if total != 4096 {
+		t.Fatalf("leídos %d bytes de 4096", total)
+	}
+}
+
+// Si la orden se cae, el canal tiene que caerse con ella Y decir por qué: sin
+// la cola de su salida de error, se ve el canal reintentarse cada 3 s sin una
+// sola pista de qué le pasa.
+func TestExecSourceReportsWhyTheCommandDied(t *testing.T) {
+	useLang(t, langEN)
+	src, err := startExec(context.Background(), helperCommand(512, 3))
+	if err != nil {
+		t.Fatalf("arrancando la orden: %v", err)
+	}
+	defer src.Close()
+
+	buf := make([]byte, 1316)
+	var last error
+	for i := 0; i < 10; i++ {
+		if _, last = src.next(buf); last != nil {
+			break
+		}
+	}
+	if last == nil || last == io.EOF {
+		t.Fatalf("una orden que sale con código 3 tiene que dar error, dio %v", last)
+	}
+	if !strings.Contains(last.Error(), "el material no se puede abrir") {
+		t.Fatalf("el error no incluye la salida de la orden: %v", last)
 	}
 }
 

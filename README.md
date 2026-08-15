@@ -258,8 +258,12 @@ tocar nada.
 Emite un flujo multicast al bitrate que le pidas. Tres orígenes posibles:
 
 ```sh
-# un fichero, en bucle
+# un fichero TS, en bucle
 mcast-send -d 239.0.10.1:5000 -f barras.ts -b 10M -iface eth0
+
+# cualquier otro formato: ffmpeg lo remultiplexa y mcast-send lo supervisa
+mcast-send -d 239.0.10.1:5000 -b 8M \
+           -exec "ffmpeg -v quiet -re -i entrada.mp4 -c copy -f mpegts -"
 
 # lo que le llegue por la entrada estándar
 ffmpeg -re -i entrada.mp4 -c copy -f mpegts - | mcast-send -d 239.0.10.1:5000 -stdin -b 8M
@@ -273,6 +277,7 @@ mcast-send -d 239.0.99.1:5000 -b 2M
 | `-d` | — | destino `GRUPO:PUERTO` (obligatorio) |
 | `-f` | — | fichero a emitir |
 | `-stdin` | false | leer de la entrada estándar |
+| `-exec` | — | ejecutar esta orden y emitir su salida estándar |
 | `-b` | 10M | bitrate: bits/s o con sufijo (`10M`, `512k`, `2.5M`) |
 | `-size` | 1316 | bytes de payload por datagrama (1316 = 7 paquetes TS) |
 | `-loop-file` | true | volver a empezar el fichero al terminarlo |
@@ -303,14 +308,51 @@ sencillamente un bitrate configurado por encima de lo que el material da de
 sí—. Un `rebase` que sube constantemente significa que estás pidiendo más de lo
 que tu fuente puede entregar; el flujo sale igual, pero no al ritmo que crees.
 
-### Es un bombeador de bytes, no un multiplexor
+### Otros formatos: `exec`
 
-`mcast-send` trocea y pacea; no parsea nada. Con eso cubre el caso normal de
-IPTV —MPEG-TS sobre UDP crudo— pero conviene saber qué **no** hace: ni RTP, ni
-FEC (SMPTE 2022), ni SRT/RIST, ni remultiplexado, ni transcodificación, ni
-bitrate variable guiado por el PCR. Si le pides 10 Mbps a un TS que en realidad
-son 6, lo emitirás 1,6 veces más rápido y le reventarás el búfer al
-decodificador: el bitrate correcto lo pones tú.
+Por UDP multicast viaja MPEG-TS. Un MP4, un MKV o un MOV **no se pueden emitir
+tal cual**: saldrían a su bitrate, con cero errores en las estadísticas, y no
+habría decodificador capaz de leerlos. Así que si le das uno, se rechaza con la
+orden exacta para arreglarlo:
+
+```
+canal 'peli': /srv/peli.mp4 es MP4/MOV, y por UDP multicast viaja MPEG-TS.
+              Remultiplexa sin recodificar:
+              ffmpeg -i /srv/peli.mp4 -c copy -f mpegts /srv/peli.ts
+```
+
+Y para no tener que preparar el material a mano, `exec` lanza esa conversión
+**bajo supervisión**:
+
+```json
+{ "name": "peli", "dest": "239.0.10.3:5000", "bitrate": "6M",
+  "exec": "ffmpeg -v quiet -re -i /srv/media/peli.mp4 -c copy -f mpegts -" }
+```
+
+La orden vive y muere con el canal: si se cae, el canal se cae con ella y se
+reintenta como cualquier otro; si paras el canal, se mata la orden — comprobado
+que no quedan procesos huérfanos. Y cuando muere, el log trae **su última
+salida de error**, que es lo que necesitas para saber qué le pasó:
+
+```
+[peli] relé caído (origen de datos: la orden ha fallado (exit status 1);
+       su última salida: No such file or directory); reintento en 3s
+```
+
+Cada canal lanza la suya, así que esto **sí escala a multicanal**, a diferencia
+de `-stdin`, del que solo puede tirar un canal por proceso.
+
+La orden no pasa por un intérprete: se parte respetando comillas y se ejecuta
+directamente. No hay expansión de `*`, ni tuberías, ni `&&` — y tampoco hay
+inyección desde el fichero de configuración.
+
+### Sigue sin ser un multiplexor
+
+`mcast-send` trocea y pacea; no parsea el contenido. Con `exec` delega el
+formato en quien sabe, pero él mismo no hace: ni RTP, ni FEC (SMPTE 2022), ni
+SRT/RIST, ni transcodificación, ni bitrate variable guiado por el PCR. Si le
+pides 10 Mbps a un TS que en realidad son 6, lo emitirás 1,6 veces más rápido y
+le reventarás el búfer al decodificador: el bitrate correcto lo pones tú.
 
 Por eso el tamaño por defecto es **1316 = 7 × 188**, un número entero de
 paquetes TS. Si el material parece un transport stream —se comprueba mirando los
@@ -349,6 +391,7 @@ fichero que no se puede leer, dos canales al mismo destino).
 | `file` | canal | — | fichero a emitir |
 | `loop` | canal | true | repetir el fichero al acabarlo |
 | `stdin` | canal | false | leer de la entrada estándar |
+| `exec` | canal | — | orden externa cuya salida estándar se emite |
 | `bitrate` | ambos | `10M` | bits/s o con sufijo |
 | `size` | ambos | 1316 | bytes de payload por datagrama |
 | `iface`, `ttl`, `loopback`, `sndbuf`, `stats` | ambos | | como en el relé |

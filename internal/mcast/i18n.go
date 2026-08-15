@@ -52,6 +52,7 @@ type msgs struct {
 	flagSendSize     string
 	flagSendLoopFile string
 	flagSendLoopback string
+	flagSendExec     string
 
 	// Validación de la configuración
 	warnDupChannel   string
@@ -78,6 +79,9 @@ type msgs struct {
 	warnFileNotTS    string
 	warnEmptyFile    string
 	warnTwoStdin     string
+	warnManySources  string
+	warnNotTSFile    string
+	warnExecMissing  string
 
 	// Errores de red
 	errNoIface          string
@@ -95,6 +99,8 @@ type msgs struct {
 	errSockopt          string
 	errPayload          string
 	errBadRate          string
+	errExecEmpty        string
+	errExecFailed       string
 
 	// Avisos de socket
 	warnNoDstFilter  string
@@ -160,6 +166,7 @@ var msgsEN = msgs{
 	flagSendSize:     "payload bytes per datagram (1316 = 7 TS packets)",
 	flagSendLoopFile: "restart the file when it ends",
 	flagSendLoopback: "outgoing multicast loopback",
+	flagSendExec:     "run this command and emit its standard output (e.g. an ffmpeg that remuxes to MPEG-TS)",
 
 	warnDupChannel:   "duplicate channel '%s' ignored",
 	warnNoSourceDest: "channel '%s' has no source/dest, ignored",
@@ -185,6 +192,9 @@ var msgsEN = msgs{
 	warnFileNotTS:    "channel '%s': %s looks like MPEG-TS, but its length (%d bytes) is not a multiple of %d: every loop would emit a truncated packet",
 	warnEmptyFile:    "channel '%s': %s is empty, there is nothing to emit; ignored",
 	warnTwoStdin:     "channel '%s' also reads from stdin, and only one channel can: both streams would get alternate chunks; ignored",
+	warnManySources:  "channel '%s' asks for more than one source (file, stdin or exec); pick one, ignored",
+	warnNotTSFile:    "channel '%s': %s is %s, and UDP multicast carries MPEG-TS. Remux it without re-encoding:  ffmpeg -i %s -c copy -f mpegts %s",
+	warnExecMissing:  "channel '%s' cannot run %s (%v), ignored",
 
 	errNoIface:          "no interface named or addressed %s",
 	errIfaceDown:        "interface %s is down",
@@ -201,6 +211,8 @@ var msgsEN = msgs{
 	errSockopt:          "socket option %s: %w",
 	errPayload:          "payload: %w",
 	errBadRate:          "unusable bitrate/size (%d bps, %d B): with no clock it would emit at line rate",
+	errExecEmpty:        "the exec command is empty",
+	errExecFailed:       "the source command failed (%v); its last output: %s",
 
 	warnNoDstFilter:  "[%s] this platform cannot filter by destination address: foreign unicast or broadcast traffic reaching port %d will be relayed too",
 	warnSockbuf:      "[%s] could not set %s to %d bytes: %v",
@@ -263,6 +275,7 @@ var msgsES = msgs{
 	flagSendSize:     "bytes de payload por datagrama (1316 = 7 paquetes TS)",
 	flagSendLoopFile: "volver a empezar el fichero al terminarlo",
 	flagSendLoopback: "loopback multicast de salida",
+	flagSendExec:     "ejecutar esta orden y emitir su salida estándar (por ejemplo un ffmpeg que remultiplexe a MPEG-TS)",
 
 	warnDupChannel:   "canal duplicado '%s' ignorado",
 	warnNoSourceDest: "canal '%s' sin source/dest, ignorado",
@@ -288,6 +301,9 @@ var msgsES = msgs{
 	warnFileNotTS:    "canal '%s': %s parece MPEG-TS, pero su longitud (%d bytes) no es múltiplo de %d: cada vuelta del bucle emitiría un paquete cortado",
 	warnEmptyFile:    "canal '%s': %s está vacío, no hay nada que emitir; ignorado",
 	warnTwoStdin:     "canal '%s' también lee de stdin, y solo puede hacerlo uno: los dos flujos recibirían trozos alternos; ignorado",
+	warnManySources:  "canal '%s' pide más de una fuente (fichero, stdin o exec); elige una, ignorado",
+	warnNotTSFile:    "canal '%s': %s es %s, y por UDP multicast viaja MPEG-TS. Remultiplexa sin recodificar:  ffmpeg -i %s -c copy -f mpegts %s",
+	warnExecMissing:  "canal '%s' no puede ejecutar %s (%v), ignorado",
 
 	errNoIface:          "no hay ninguna interfaz llamada ni direccionada %s",
 	errIfaceDown:        "la interfaz %s está caída",
@@ -304,6 +320,8 @@ var msgsES = msgs{
 	errSockopt:          "opción de socket %s: %w",
 	errPayload:          "origen de datos: %w",
 	errBadRate:          "bitrate/tamaño inservibles (%d bps, %d B): sin reloj emitiría a velocidad de cable",
+	errExecEmpty:        "la orden de exec está vacía",
+	errExecFailed:       "la orden de origen ha fallado (%v); su última salida: %s",
 
 	warnNoDstFilter:  "[%s] esta plataforma no puede filtrar por dirección de destino: el tráfico unicast o broadcast ajeno que llegue al puerto %d también se reenviará",
 	warnSockbuf:      "[%s] no se pudo fijar %s a %d bytes: %v",

@@ -27,6 +27,7 @@ func SendMain() {
 	dst := flag.String("d", "", txt.flagSendDest)
 	file := flag.String("f", "", txt.flagSendFile)
 	stdin := flag.Bool("stdin", false, txt.flagSendStdin)
+	execCmd := flag.String("exec", "", txt.flagSendExec)
 	bitrate := flag.String("b", defBitrate, txt.flagSendBitrate)
 	size := flag.Int("size", defSize, txt.flagSendSize)
 	loopFile := flag.Bool("loop-file", true, txt.flagSendLoopFile)
@@ -111,7 +112,7 @@ func SendMain() {
 			os.Exit(2)
 		}
 		r := resolveSendChannels(
-			sendConfigFromFlags(*dst, *file, *stdin, *bitrate, *size,
+			sendConfigFromFlags(*dst, *file, *execCmd, *stdin, *bitrate, *size,
 				*ifaceIP, *ttl, *loopback, *sndbuf), *statsItv)
 		for _, w := range r.warns {
 			errl.Println(w)
