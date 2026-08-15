@@ -122,7 +122,7 @@ func allowedSender(from []string, src net.Addr) bool {
 // Si la plataforma no lo implementa —Windows, hoy— cae a un join normal y
 // avisa: el filtrado seguirá haciéndose aquí, en el bucle de recepción, que
 // protege el flujo igual aunque no ahorre ancho de banda.
-func joinGroup(rx *ipv4.PacketConn, ifi *net.Interface, group net.IP, e EffCfg, errl *log.Logger) error {
+func joinGroup(rx *ipv4.PacketConn, ifi *net.Interface, group net.IP, e EffCfg, info, errl *log.Logger) error {
 	g := &net.UDPAddr{IP: group}
 	if len(e.From) > 0 {
 		joined := make([]*net.UDPAddr, 0, len(e.From))
@@ -137,7 +137,7 @@ func joinGroup(rx *ipv4.PacketConn, ifi *net.Interface, group net.IP, e EffCfg, 
 			joined = append(joined, s)
 		}
 		if ok {
-			errl.Printf(txt.logSSMJoined, e.Name, e.Source, strings.Join(e.From, ", "))
+			info.Printf(txt.logSSMJoined, e.Name, e.Source, strings.Join(e.From, ", "))
 			return nil
 		}
 		// Deshace los que sí entraron: mezclar (S,G) y (*,G) en el mismo socket
@@ -153,7 +153,7 @@ func joinGroup(rx *ipv4.PacketConn, ifi *net.Interface, group net.IP, e EffCfg, 
 }
 
 // runRelay monta los sockets y reenvía hasta que ctx se cancela o hay error grave.
-func runRelay(ctx context.Context, e EffCfg, st *stats, errl *log.Logger) error {
+func runRelay(ctx context.Context, e EffCfg, st *stats, info, errl *log.Logger) error {
 	saddr, err := net.ResolveUDPAddr("udp4", e.Source)
 	if err != nil {
 		return fmt.Errorf(txt.errSource, e.Source, err)
@@ -181,7 +181,7 @@ func runRelay(ctx context.Context, e EffCfg, st *stats, errl *log.Logger) error 
 	}
 	defer pc.Close()
 	rx := ipv4.NewPacketConn(pc)
-	if err := joinGroup(rx, ifi, saddr.IP, e, errl); err != nil {
+	if err := joinGroup(rx, ifi, saddr.IP, e, info, errl); err != nil {
 		return err
 	}
 	if uc, ok := pc.(*net.UDPConn); ok {

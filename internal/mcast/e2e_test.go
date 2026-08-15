@@ -96,7 +96,7 @@ func TestEndToEndSendRelayReceive(t *testing.T) {
 		Iface: ifi.Name, TTL: 0, Loop: true, Rcvbuf: 1 << 20,
 	}
 	relayDone := make(chan error, 1)
-	go func() { relayDone <- runRelay(ctx, relayCfg, &stats{name: "e2e"}, quiet) }()
+	go func() { relayDone <- runRelay(ctx, relayCfg, &stats{name: "e2e"}, quiet, quiet) }()
 	time.Sleep(300 * time.Millisecond) // que el join cuaje antes de emitir
 
 	// El emisor: patrón numerado a ~2 Mbps.

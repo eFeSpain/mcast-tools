@@ -73,7 +73,7 @@ func RelayMain() {
 	defer rootCancel()
 	mgr := NewManager[EffCfg](rootCtx, info, errl)
 	mgr.run = func(ctx context.Context, e EffCfg, st *stats) error {
-		return runRelay(ctx, e, st, errl)
+		return runRelay(ctx, e, st, info, errl)
 	}
 
 	load := func() bool {
