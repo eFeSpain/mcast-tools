@@ -131,6 +131,7 @@ needs.
 | `name` | channel | its `source` | name in the logs; identifies the channel across reloads |
 | `source` | channel | required | source `GROUP:PORT`, must be multicast |
 | `dest` | channel | required | list of destination `GROUP:PORT` (unicast works too) |
+| `from` | channel | — | senders the group is accepted from; empty accepts any. See [Filtering by sender (SSM)](#filtering-by-sender-ssm) |
 
 ### Filtering by sender (SSM)
 
@@ -469,6 +470,7 @@ bitrate, missing file, two channels aimed at the same destination).
 
 | Field | Scope | Default | What it does |
 |---|---|---|---|
+| `name` | channel | its `dest` | name in the logs; identifies the channel across reloads |
 | `dest` | channel | required | `GROUP:PORT` to emit to |
 | `file` | channel | — | file to emit |
 | `loop` | channel | true | restart the file when it ends |
@@ -477,7 +479,8 @@ bitrate, missing file, two channels aimed at the same destination).
 | `rtp` | both | false | wrap each datagram in RTP |
 | `bitrate` | both | `10M` | bits/s, with a suffix, or `pcr` to follow the stream clock |
 | `size` | both | 1316 | payload bytes per datagram |
-| `iface`, `ttl`, `loopback`, `sndbuf`, `stats` | both | | as in the relay |
+| `stats` | defaults | 10 | seconds between summaries (0 turns them off) |
+| `iface`, `ttl`, `loopback`, `sndbuf` | both | | as in the relay |
 
 ### Why emitting is harder than forwarding
 

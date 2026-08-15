@@ -133,6 +133,7 @@ necesite.
 | `name` | canal | el `source` | nombre en los logs; identifica el canal en las recargas |
 | `source` | canal | obligatorio | `GRUPO:PUERTO` de origen, tiene que ser multicast |
 | `dest` | canal | obligatorio | lista de `GRUPO:PUERTO` destino (también vale unicast) |
+| `from` | canal | — | emisores de los que se acepta el grupo; vacío acepta cualquiera. Ver [Filtrar por emisor (SSM)](#filtrar-por-emisor-ssm) |
 
 ### Filtrar por emisor (SSM)
 
@@ -470,6 +471,7 @@ fichero que no se puede leer, dos canales al mismo destino).
 
 | Campo | Ámbito | Por defecto | Qué hace |
 |---|---|---|---|
+| `name` | canal | el `dest` | nombre en los logs; identifica el canal en las recargas |
 | `dest` | canal | obligatorio | `GRUPO:PUERTO` al que emitir |
 | `file` | canal | — | fichero a emitir |
 | `loop` | canal | true | repetir el fichero al acabarlo |
@@ -478,7 +480,8 @@ fichero que no se puede leer, dos canales al mismo destino).
 | `rtp` | ambos | false | encapsular cada datagrama en RTP |
 | `bitrate` | ambos | `10M` | bits/s, con sufijo, o `pcr` para seguir el reloj del flujo |
 | `size` | ambos | 1316 | bytes de payload por datagrama |
-| `iface`, `ttl`, `loopback`, `sndbuf`, `stats` | ambos | | como en el relé |
+| `stats` | defaults | 10 | segundos entre resúmenes (0 los apaga) |
+| `iface`, `ttl`, `loopback`, `sndbuf` | ambos | | como en el relé |
 
 ### Por qué emitir es más difícil que reenviar
 
