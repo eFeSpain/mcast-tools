@@ -34,6 +34,7 @@ func SendMain() {
 	ifaceIP := flag.String("iface", "", txt.flagIface)
 	ttl := flag.Int("ttl", defTTL, txt.flagTTL)
 	loopback := flag.Bool("loop", true, txt.flagSendLoopback)
+	rtp := flag.Bool("rtp", false, txt.flagSendRTP)
 	sndbuf := flag.Int("sndbuf", 0, txt.flagSndbuf)
 	statsItv := flag.Float64("stats", defStats, txt.flagStats)
 	flag.String("lang", "auto", txt.flagLang) // ya leído de os.Args; aquí solo para -h
@@ -113,7 +114,7 @@ func SendMain() {
 		}
 		r := resolveSendChannels(
 			sendConfigFromFlags(*dst, *file, *execCmd, *stdin, *bitrate, *size,
-				*ifaceIP, *ttl, *loopback, *sndbuf), *statsItv)
+				*ifaceIP, *ttl, *loopback, *rtp, *sndbuf), *statsItv)
 		for _, w := range r.warns {
 			errl.Println(w)
 		}

@@ -174,13 +174,13 @@ func TestSenderAutomaticNameComesFromDest(t *testing.T) {
 func TestSenderFlagsModeMatchesDaemonValidation(t *testing.T) {
 	useLang(t, langEN)
 	// Un destino imposible tiene que rechazarse igual que en el JSON.
-	r := resolveSendChannels(sendConfigFromFlags("basura", "", "", false, "10M", 1316, "", 8, true, 0), 10)
+	r := resolveSendChannels(sendConfigFromFlags("basura", "", "", false, "10M", 1316, "", 8, true, false, 0), 10)
 	if len(r.channels) != 0 {
 		t.Fatal("destino inválido aceptado en modo flags")
 	}
 
 	// Y uno bueno tiene que conservar las opciones.
-	r = resolveSendChannels(sendConfigFromFlags("239.0.10.1:5000", "", "", true, "512k", 940, "10.30.0.5", 3, false, 1<<16), 10)
+	r = resolveSendChannels(sendConfigFromFlags("239.0.10.1:5000", "", "", true, "512k", 940, "10.30.0.5", 3, false, false, 1<<16), 10)
 	if len(r.channels) != 1 {
 		t.Fatalf("canal válido rechazado: %v", r.warns)
 	}

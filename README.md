@@ -278,7 +278,8 @@ mcast-send -d 239.0.99.1:5000 -b 2M
 | `-f` | — | fichero a emitir |
 | `-stdin` | false | leer de la entrada estándar |
 | `-exec` | — | ejecutar esta orden y emitir su salida estándar |
-| `-b` | 10M | bitrate: bits/s o con sufijo (`10M`, `512k`, `2.5M`) |
+| `-rtp` | false | encapsular en RTP (RFC 3550, PT 33) |
+| `-b` | 10M | bitrate: bits/s, con sufijo (`10M`, `512k`) o `pcr` |
 | `-size` | 1316 | bytes de payload por datagrama (1316 = 7 paquetes TS) |
 | `-loop-file` | true | volver a empezar el fichero al terminarlo |
 | `-iface`, `-ttl`, `-loop`, `-sndbuf`, `-stats`, `-logfile`, `-lang` | | como en `mcast-dup` |
@@ -346,6 +347,53 @@ La orden no pasa por un intérprete: se parte respetando comillas y se ejecuta
 directamente. No hay expansión de `*`, ni tuberías, ni `&&` — y tampoco hay
 inyección desde el fichero de configuración.
 
+### Que el ritmo lo marque el flujo: `"bitrate": "pcr"`
+
+Acertar el bitrate a mano es un problema real: si le pides 10 Mbps a un TS que
+son 6, lo emites 1,6 veces más rápido y le revientas el búfer al decodificador;
+si te quedas corto, lo matas de hambre. Y con material de bitrate variable no
+hay número correcto.
+
+El propio transport stream lleva la respuesta. El **PCR** (*Program Clock
+Reference*) es el reloj del multiplexor, en unidades de 27 MHz, y viaja en el
+campo de adaptación de algunos paquetes. Con `pcr` en vez de un número, el
+emisor lo lee y reproduce el flujo **exactamente al ritmo al que se creó**:
+
+```json
+{ "name": "peli", "dest": "239.0.10.3:5000", "bitrate": "pcr" }
+```
+
+Medido sobre un TS cuyo PCR dice 6 Mbps:
+
+| Configuración | Emitido |
+|---|---|
+| `"bitrate": "20M"` | 12,85 Mbps — lo que le digas, aunque esté mal |
+| `"bitrate": "pcr"` | **6,00 Mbps** — el ritmo real del flujo |
+
+Se ancla al reloj del flujo e interpola entre PCR con el ritmo medido entre los
+dos últimos, así que no acumula deriva por mucho que dure la emisión. Un salto
+del contador —da la vuelta cada ~26 h— o un corte de material se detectan y se
+vuelve a anclar, en vez de intentar recuperar el desfase de golpe con una
+ráfaga.
+
+Si el flujo no trae PCR (no es TS, o no los lleva), tras 4 MB se avisa y se
+vuelve al bitrate configurado, que sigue haciendo falta como estimación
+inicial: hasta el segundo PCR no hay ritmo medido.
+
+Exige que `size` sea múltiplo de 188, porque si no los paquetes TS salen
+partidos y no hay PCR que leer.
+
+### RTP: `"rtp": true`
+
+Añade la cabecera de 12 bytes de RFC 3550 con *payload type* 33 (MP2T). La
+necesitan SMPTE 2022-2 y muchos decodificadores profesionales, y de paso da al
+receptor **números de secuencia** para detectar pérdidas y reordenaciones, cosa
+imposible con UDP a pelo.
+
+Por eso el payload por defecto son 1316 bytes: 1316 + 12 = 1328, que cabe
+holgado en una MTU de 1500. La secuencia y el SSRC arrancan aleatorios, como
+manda la norma.
+
 ### Sigue sin ser un multiplexor
 
 `mcast-send` trocea y pacea; no parsea el contenido. Con `exec` delega el
@@ -392,7 +440,8 @@ fichero que no se puede leer, dos canales al mismo destino).
 | `loop` | canal | true | repetir el fichero al acabarlo |
 | `stdin` | canal | false | leer de la entrada estándar |
 | `exec` | canal | — | orden externa cuya salida estándar se emite |
-| `bitrate` | ambos | `10M` | bits/s o con sufijo |
+| `rtp` | ambos | false | encapsular cada datagrama en RTP |
+| `bitrate` | ambos | `10M` | bits/s, con sufijo, o `pcr` para seguir el reloj del flujo |
 | `size` | ambos | 1316 | bytes de payload por datagrama |
 | `iface`, `ttl`, `loopback`, `sndbuf`, `stats` | ambos | | como en el relé |
 

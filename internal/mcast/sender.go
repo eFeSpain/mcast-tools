@@ -355,12 +355,26 @@ func runSender(ctx context.Context, e SendCfg, st *stats, errl *log.Logger) erro
 		return fmt.Errorf(txt.errBadRate, e.Bitrate, e.Size)
 	}
 
-	buf := make([]byte, e.Size)
+	// Con RTP el datagrama lleva 12 bytes de cabecera delante del payload, así
+	// que se reserva sitio y la fuente escribe a partir de ahí.
+	head := 0
+	var rtp *rtpWriter
+	if e.RTP {
+		head = rtpHeaderLen
+		rtp = newRTPWriter()
+	}
+	pkt := make([]byte, head+e.Size)
+	buf := pkt[head:]
+
 	// Segundos que ocupa un byte al bitrate pedido. Se pacea por BYTES y no por
 	// paquetes: un datagrama corto (la cola de un fichero, un vaciado parcial
 	// de la tubería) no puede consumir un periodo entero, o el bitrate real se
 	// quedaría por debajo del pedido sin que nadie lo notara.
 	perByte := 8 * float64(time.Second) / float64(e.Bitrate)
+	var pacer *pcrPacer
+	if e.PCR {
+		pacer = newPCRPacer(float64(e.Bitrate) / 8)
+	}
 	start := time.Now()
 	var bytesSent float64
 
@@ -378,7 +392,19 @@ func runSender(ctx context.Context, e SendCfg, st *stats, errl *log.Logger) erro
 		if n == 0 {
 			continue
 		}
-		if w, err := tx.WriteTo(buf[:n], nil, dst); err != nil {
+		now := time.Now()
+		// El PCR se mira ANTES de emitir: es lo que decide cuándo sale.
+		if pacer != nil && !pacer.gaveUp {
+			pacer.observe(buf[:n], bytesSent, now)
+			if !pacer.started && bytesSent > pcrProbeBytes {
+				pacer.gaveUp = true
+				errl.Printf(txt.warnNoPCR, e.Name, float64(e.Bitrate)/1e6)
+			}
+		}
+		if rtp != nil {
+			rtp.header(pkt, now)
+		}
+		if w, err := tx.WriteTo(pkt[:head+n], nil, dst); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -390,9 +416,16 @@ func runSender(ctx context.Context, e SendCfg, st *stats, errl *log.Logger) erro
 		}
 		bytesSent += float64(n)
 
-		// Reloj absoluto: cuándo DEBERÍA haber salido este volumen contando
-		// desde el arranque. Así el error de cada sueño no se acumula.
+		// Reloj absoluto: cuándo DEBERÍA haber salido este volumen. Con PCR lo
+		// dice el propio flujo; si no, el bitrate configurado. En los dos casos
+		// es una referencia absoluta, así que el error de cada sueño no se
+		// acumula.
 		target := start.Add(time.Duration(bytesSent * perByte))
+		if pacer != nil && pacer.started {
+			if t := pacer.target(bytesSent); !t.IsZero() {
+				target = t
+			}
+		}
 		wait := time.Until(target)
 		switch {
 		case wait > 0:

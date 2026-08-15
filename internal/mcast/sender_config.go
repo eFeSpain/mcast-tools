@@ -29,6 +29,7 @@ type SendDefaults struct {
 	Sndbuf   int      `json:"sndbuf"`
 	Stats    *float64 `json:"stats"`
 	Size     int      `json:"size"`
+	RTP      *bool    `json:"rtp"`
 	Bitrate  string   `json:"bitrate"`
 }
 
@@ -41,6 +42,7 @@ type SendChannelCfg struct {
 	// ffmpeg que remultiplexa cualquier formato a MPEG-TS. Vive y muere con el
 	// canal, así que se reinicia sola si se cae.
 	Exec     string `json:"exec"`
+	RTP      *bool  `json:"rtp"`
 	Stdin    bool   `json:"stdin"`
 	Bitrate  string `json:"bitrate"`
 	Size     int    `json:"size"`
@@ -69,6 +71,8 @@ type SendCfg struct {
 	Loop     bool // repetir el fichero al llegar al final
 	Exec     string
 	Stdin    bool
+	RTP      bool
+	PCR      bool // pacing guiado por el PCR del propio flujo
 }
 
 func (e SendCfg) chanName() string { return e.Name }
@@ -319,9 +323,33 @@ func resolveSendChannels(c SendConfig, statsFlag float64) sendResolved {
 		if ch.Bitrate != "" {
 			rate = ch.Bitrate
 		}
+		// "pcr" pide que el ritmo lo marque el reloj del propio transport
+		// stream. El bitrate configurado sigue haciendo falta como estimación
+		// inicial: hasta el segundo PCR no hay ritmo medido.
+		porPCR := strings.EqualFold(strings.TrimSpace(rate), "pcr")
+		if porPCR {
+			rate = defBitrate
+		}
 		bps, err := parseBitrate(rate)
 		if err != nil {
 			reject(txt.warnBadBitrate, name, rate)
+			continue
+		}
+		// Con RTP el datagrama crece 12 bytes: hay que comprobar que sigue
+		// cabiendo, y avisar si se pasa de la MTU típica.
+		if porPCR && size%tsPacket != 0 {
+			reject(txt.warnPCRNeedsTS, name, size, tsPacket)
+			continue
+		}
+		usaRTP := false
+		if d.RTP != nil {
+			usaRTP = *d.RTP
+		}
+		if ch.RTP != nil {
+			usaRTP = *ch.RTP
+		}
+		if usaRTP && size+rtpHeaderLen > 65507 {
+			reject(txt.warnBadSize, name, size+rtpHeaderLen)
 			continue
 		}
 		// Fichero, stdin y exec son excluyentes: con dos a la vez no hay forma
@@ -398,6 +426,7 @@ func resolveSendChannels(c SendConfig, statsFlag float64) sendResolved {
 			Name: name, Dest: da.String(), Iface: d.Iface, TTL: ttl,
 			Loopback: dLoopback, Sndbuf: d.Sndbuf, Bitrate: bps, Size: size,
 			File: ch.File, Loop: loop, Exec: ch.Exec, Stdin: ch.Stdin,
+			RTP: usaRTP, PCR: porPCR,
 		}
 		if ch.Iface != "" {
 			e.Iface = ch.Iface
@@ -433,11 +462,12 @@ func sendCompatible(cand SendCfg, with []SendCfg) bool {
 // sendConfigFromFlags convierte el modo flags en una SendConfig de un canal,
 // para que pase por las mismas validaciones que el modo daemon.
 func sendConfigFromFlags(dst, file, execCmd string, stdin bool, bitrate string, size int,
-	iface string, ttl int, loopback bool, sndbuf int) SendConfig {
+	iface string, ttl int, loopback, rtp bool, sndbuf int) SendConfig {
 	loop := true
 	return SendConfig{Channels: []SendChannelCfg{{
 		Name: "cli", Dest: strings.TrimSpace(dst), File: file, Exec: strings.TrimSpace(execCmd), Stdin: stdin,
 		Loop: &loop, Bitrate: bitrate, Size: size, Iface: iface,
+		RTP: &rtp,
 		TTL: &ttl, Loopback: &loopback, Sndbuf: &sndbuf,
 	}}}
 }

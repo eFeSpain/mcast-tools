@@ -53,6 +53,7 @@ type msgs struct {
 	flagSendLoopFile string
 	flagSendLoopback string
 	flagSendExec     string
+	flagSendRTP      string
 
 	// Validación de la configuración
 	warnDupChannel   string
@@ -82,6 +83,8 @@ type msgs struct {
 	warnManySources  string
 	warnNotTSFile    string
 	warnExecMissing  string
+	warnPCRNeedsTS   string
+	warnNoPCR        string
 
 	// Errores de red
 	errNoIface          string
@@ -162,11 +165,12 @@ var msgsEN = msgs{
 	flagSendDest:     "flags mode: destination GROUP:PORT",
 	flagSendFile:     "file to emit (looped by default)",
 	flagSendStdin:    "read what to emit from standard input",
-	flagSendBitrate:  "bitrate: bits/s or a suffix like 10M, 512k",
+	flagSendBitrate:  "bitrate: bits/s, a suffix like 10M or 512k, or \"pcr\" to follow the stream own clock",
 	flagSendSize:     "payload bytes per datagram (1316 = 7 TS packets)",
 	flagSendLoopFile: "restart the file when it ends",
 	flagSendLoopback: "outgoing multicast loopback",
 	flagSendExec:     "run this command and emit its standard output (e.g. an ffmpeg that remuxes to MPEG-TS)",
+	flagSendRTP:      "wrap each datagram in an RTP header (RFC 3550, PT 33): needed by SMPTE 2022-2 and many professional decoders",
 
 	warnDupChannel:   "duplicate channel '%s' ignored",
 	warnNoSourceDest: "channel '%s' has no source/dest, ignored",
@@ -195,6 +199,8 @@ var msgsEN = msgs{
 	warnManySources:  "channel '%s' asks for more than one source (file, stdin or exec); pick one, ignored",
 	warnNotTSFile:    "channel '%s': %s is %s, and UDP multicast carries MPEG-TS. Remux it without re-encoding:  ffmpeg -i %s -c copy -f mpegts %s",
 	warnExecMissing:  "channel '%s' cannot run %s (%v), ignored",
+	warnPCRNeedsTS:   "channel '%s' asks for PCR pacing, but a datagram size of %d is not a multiple of %d: the TS packets would be split and no PCR could be read; ignored",
+	warnNoPCR:        "[%s] no PCR found in the stream: it is not MPEG-TS, or it carries none. Falling back to the configured %.2f Mbps",
 
 	errNoIface:          "no interface named or addressed %s",
 	errIfaceDown:        "interface %s is down",
@@ -271,11 +277,12 @@ var msgsES = msgs{
 	flagSendDest:     "modo flags: destino GRUPO:PUERTO",
 	flagSendFile:     "fichero a emitir (en bucle por defecto)",
 	flagSendStdin:    "leer de la entrada estándar lo que hay que emitir",
-	flagSendBitrate:  "bitrate: bits/s o con sufijo, 10M, 512k",
+	flagSendBitrate:  "bitrate: bits/s, con sufijo (10M, 512k) o \"pcr\" para seguir el reloj del propio flujo",
 	flagSendSize:     "bytes de payload por datagrama (1316 = 7 paquetes TS)",
 	flagSendLoopFile: "volver a empezar el fichero al terminarlo",
 	flagSendLoopback: "loopback multicast de salida",
 	flagSendExec:     "ejecutar esta orden y emitir su salida estándar (por ejemplo un ffmpeg que remultiplexe a MPEG-TS)",
+	flagSendRTP:      "encapsular cada datagrama en RTP (RFC 3550, PT 33): lo necesitan SMPTE 2022-2 y muchos decodificadores profesionales",
 
 	warnDupChannel:   "canal duplicado '%s' ignorado",
 	warnNoSourceDest: "canal '%s' sin source/dest, ignorado",
@@ -304,6 +311,8 @@ var msgsES = msgs{
 	warnManySources:  "canal '%s' pide más de una fuente (fichero, stdin o exec); elige una, ignorado",
 	warnNotTSFile:    "canal '%s': %s es %s, y por UDP multicast viaja MPEG-TS. Remultiplexa sin recodificar:  ffmpeg -i %s -c copy -f mpegts %s",
 	warnExecMissing:  "canal '%s' no puede ejecutar %s (%v), ignorado",
+	warnPCRNeedsTS:   "canal '%s' pide pacing por PCR, pero un datagrama de %d no es múltiplo de %d: los paquetes TS saldrían partidos y no se podría leer ningún PCR; ignorado",
+	warnNoPCR:        "[%s] no se ha encontrado ningún PCR en el flujo: o no es MPEG-TS, o no los lleva. Se vuelve a los %.2f Mbps configurados",
 
 	errNoIface:          "no hay ninguna interfaz llamada ni direccionada %s",
 	errIfaceDown:        "la interfaz %s está caída",

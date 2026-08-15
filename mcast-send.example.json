@@ -26,7 +26,8 @@
       "name": "peli-mp4",
       "dest": "239.0.10.3:5000",
       "exec": "ffmpeg -v quiet -re -i /srv/media/peli.mp4 -c copy -f mpegts -",
-      "bitrate": "6M"
+      "bitrate": "pcr",
+      "rtp": true
     },
     {
       "name": "patron-pruebas",

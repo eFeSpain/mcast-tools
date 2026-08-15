@@ -277,7 +277,8 @@ mcast-send -d 239.0.99.1:5000 -b 2M
 | `-f` | — | file to emit |
 | `-stdin` | false | read from standard input |
 | `-exec` | — | run this command and emit its standard output |
-| `-b` | 10M | bitrate: bits/s or with a suffix (`10M`, `512k`, `2.5M`) |
+| `-rtp` | false | wrap in RTP (RFC 3550, PT 33) |
+| `-b` | 10M | bitrate: bits/s, with a suffix (`10M`, `512k`) or `pcr` |
 | `-size` | 1316 | payload bytes per datagram (1316 = 7 TS packets) |
 | `-loop-file` | true | restart the file when it ends |
 | `-iface`, `-ttl`, `-loop`, `-sndbuf`, `-stats`, `-logfile`, `-lang` | | as in `mcast-dup` |
@@ -346,6 +347,50 @@ The command does not go through a shell: it is split honouring quotes and
 executed directly. No `*` expansion, no pipes, no `&&` — and no injection from
 the config file either.
 
+### Let the stream set the pace: `"bitrate": "pcr"`
+
+Getting the bitrate right by hand is a real problem: ask for 10 Mbps from a TS
+that is really 6 and you emit it 1.6× too fast and blow the decoder's buffer;
+undershoot and you starve it. And with variable-bitrate material there is no
+correct number.
+
+The transport stream itself carries the answer. The **PCR** (*Program Clock
+Reference*) is the muxer's clock, in 27 MHz units, travelling in the adaptation
+field of some packets. With `pcr` instead of a number, the sender reads it and
+replays the stream **exactly at the rate it was created**:
+
+```json
+{ "name": "movie", "dest": "239.0.10.3:5000", "bitrate": "pcr" }
+```
+
+Measured on a TS whose PCR says 6 Mbps:
+
+| Configuration | Emitted |
+|---|---|
+| `"bitrate": "20M"` | 12.85 Mbps — whatever you say, even when wrong |
+| `"bitrate": "pcr"` | **6.00 Mbps** — the stream's real rate |
+
+It anchors to the stream's clock and interpolates between PCRs using the rate
+measured between the last two, so it does not accumulate drift however long the
+emission lasts. A counter wrap — every ~26 h — or a material cut is detected and
+re-anchored, instead of trying to catch up all at once with a burst.
+
+If the stream carries no PCR (not TS, or none present), after 4 MB it warns and
+falls back to the configured bitrate, which is still needed as the initial
+estimate: there is no measured rate until the second PCR.
+
+It requires `size` to be a multiple of 188, otherwise the TS packets come out
+split and there is no PCR to read.
+
+### RTP: `"rtp": true`
+
+Adds RFC 3550's 12-byte header with *payload type* 33 (MP2T). SMPTE 2022-2 and
+many professional decoders need it, and it also gives the receiver **sequence
+numbers** to detect loss and reordering, which is impossible with raw UDP.
+
+That is why the default payload is 1316 bytes: 1316 + 12 = 1328, comfortably
+inside a 1500 MTU. Sequence and SSRC start random, as the standard requires.
+
 ### It is still not a muxer
 
 `mcast-send` chunks and paces; it does not parse the content. With `exec` it
@@ -393,7 +438,8 @@ bitrate, missing file, two channels aimed at the same destination).
 | `loop` | channel | true | restart the file when it ends |
 | `stdin` | channel | false | read from standard input |
 | `exec` | channel | — | external command whose standard output is emitted |
-| `bitrate` | both | `10M` | bits/s or with a suffix |
+| `rtp` | both | false | wrap each datagram in RTP |
+| `bitrate` | both | `10M` | bits/s, with a suffix, or `pcr` to follow the stream clock |
 | `size` | both | 1316 | payload bytes per datagram |
 | `iface`, `ttl`, `loopback`, `sndbuf`, `stats` | both | | as in the relay |
 
