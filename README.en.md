@@ -287,9 +287,9 @@ at without decoding anything:
 
 It understands both raw TS and TS inside RTP.
 
-It is **on by default**, and the cost is measured: **161 ns per 1316-byte
-datagram**, which at 10 Mbps is 950 datagrams per second per channel — 0.015 %
-of one core. Analysis happens *after* forwarding, never before. It can still be
+It is **on by default**, and the cost is measured: **192 ns per 1316-byte
+datagram** with the tables already parsed, which at 10 Mbps is 950 datagrams per
+second per channel — 0.018 % of one core. Analysis happens *after* forwarding, never before. It can still be
 turned off with `"analyze": false`, in `defaults` or per channel: in a relay,
 anything that is not forwarding is optional on principle.
 

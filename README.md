@@ -287,9 +287,9 @@ ETSI TR 101 290 que se puede mirar sin decodificar:
 
 Entiende tanto TS a pelo como TS dentro de RTP.
 
-Va **activo por defecto**, y el coste está medido: **161 ns por datagrama** de
-1316 bytes, que a 10 Mbps son 950 datagramas por segundo y canal — el 0,015 %
-de un núcleo. Se analiza *después* de reenviar, nunca antes. Aun así se puede
+Va **activo por defecto**, y el coste está medido: **192 ns por datagrama** de
+1316 bytes, con las tablas ya parseadas, que a 10 Mbps son 950 datagramas por
+segundo y canal — el 0,018 % de un núcleo. Se analiza *después* de reenviar, nunca antes. Aun así se puede
 apagar con `"analyze": false`, en `defaults` o por canal: en un relé, cualquier
 cosa que no sea reenviar es opcional por principio.
 

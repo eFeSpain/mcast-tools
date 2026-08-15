@@ -440,16 +440,192 @@ func TestMisalignedDatagramsAreReported(t *testing.T) {
 // El análisis va activo por defecto, así que su coste tiene que ser
 // despreciable frente al trabajo de reenviar. Un datagrama clásico son 7
 // paquetes TS; a 10 Mbps eso es ~950 datagramas por segundo y canal.
+// El estado se calienta ANTES de medir, con PAT y PMT ya parseadas: la primera
+// versión de este benchmark medía con el mapa de programas vacío, cosa que deja
+// de ser cierta en cuanto pasa la primera tabla, y daba una cifra optimista.
 func BenchmarkAnalyzerFeed(b *testing.B) {
 	a := newTSAnalyzer()
+	a.feed(mkTS(paq{pid: patPID, cc: 0, payload: true, pusi: true,
+		datos: conPointer(patSection(1, 4096))}))
+	a.feed(mkTS(paq{pid: 4096, cc: 0, payload: true, pusi: true,
+		datos: conPointer(pmtSection(101, map[uint16]uint8{101: 0x1B, 102: 0x0F, 103: 0x81}))}))
+
+	// Un datagrama como los de verdad: 7 paquetes, mezcla de PID, uno con PCR y
+	// uno nulo, que es lo que trae un CBR.
 	d := make([]byte, 0, 7*tsPacket)
-	for i := 0; i < 7; i++ {
-		d = append(d, mkTS(paq{pid: 101, cc: uint8(i & 0x0F), payload: true,
-			tienePCR: i == 0, pcr: uint64(i) * 1000})...)
+	pids := []uint16{101, 101, 102, 101, nullPID, 103, 101}
+	cc := map[uint16]uint8{}
+	for i, pid := range pids {
+		d = append(d, mkTS(paq{pid: pid, cc: cc[pid], payload: true,
+			tienePCR: i == 0, pcr: uint64(i)*1000 + 7})...)
+		cc[pid] = (cc[pid] + 1) & 0x0F
 	}
 	b.SetBytes(int64(len(d)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		a.feed(d)
+	}
+}
+
+// ─── Regresiones de la revisión adversarial ──────────────────────────────────
+
+// Un canal de pago va cifrado por definición. Con aviso por nivel escribía
+// "66.489 paquetes cifrados" cada diez segundos para siempre, en la MISMA línea
+// donde salen los errores de continuidad — así que a la semana el operador
+// filtra "TS:" y el analizador entero deja de existir.
+func TestScramblingWarnsOnceNotForever(t *testing.T) {
+	a := newTSAnalyzer()
+	// El contador tiene que seguir correlativo ENTRE intervalos: si se
+	// reiniciara en cada tanda, el propio test fabricaría un error de
+	// continuidad en cada frontera y no probaría nada de lo que dice.
+	cc := uint8(0)
+	emitir := func() {
+		for i := 0; i < 200; i++ {
+			a.feed(mkTS(paq{pid: 101, cc: cc, payload: true, scram: true}))
+			cc = (cc + 1) & 0x0F
+		}
+	}
+	emitir()
+	if got := a.snapshot(); !strings.Contains(strings.ToLower(got), "cifrado") &&
+		!strings.Contains(strings.ToLower(got), "scrambl") {
+		t.Fatalf("el primer intervalo debería avisar del cifrado: %q", got)
+	}
+	for i := 0; i < 3; i++ {
+		emitir()
+		if got := a.snapshot(); got != "" {
+			t.Fatalf("intervalo %d de un canal de pago sano escribe en el log: %q", i+2, got)
+		}
+	}
+}
+
+// El contador de PCR de 33 bits da la vuelta cada ~26,5 h. Es aritmética
+// modular, no una discontinuidad: sin tratarlo, todo canal escribía un aviso de
+// salto de reloj cada veintiséis horas y media sin que pasara nada.
+func TestPCRCounterWrapIsNotAJump(t *testing.T) {
+	a := newTSAnalyzer()
+	// Justo antes de la vuelta, y 20 ms después de ella.
+	antes := uint64(pcrModulus) - uint64(10*pcrPerMs) + 1
+	despues := uint64(10 * pcrPerMs)
+	a.feed(mkTS(paq{pid: 100, cc: 0, payload: true, tienePCR: true, pcr: antes}))
+	a.feed(mkTS(paq{pid: 100, cc: 1, payload: true, tienePCR: true, pcr: despues}))
+
+	if got := a.snapshot(); got != "" {
+		t.Errorf("la vuelta del contador se ha tomado por un fallo: %q", got)
+	}
+}
+
+// Un paquete corrupto gasta su hueco en el contador igual. Ignorarlo a secas
+// hacía que el siguiente paquete bueno llegara dos por delante y se contara
+// como pérdida: un solo suceso producía dos avisos, uno inventado.
+func TestTEIDoesNotInventAContinuityError(t *testing.T) {
+	a := newTSAnalyzer()
+	a.feed(mkTS(paq{pid: 101, cc: 0, payload: true}))
+	a.feed(mkTS(paq{pid: 101, cc: 1, payload: true, tei: true})) // corrupto
+	a.feed(mkTS(paq{pid: 101, cc: 2, payload: true}))            // el siguiente bueno
+	a.feed(mkTS(paq{pid: 101, cc: 3, payload: true}))
+
+	if a.ccErrs != 0 {
+		t.Errorf("%d errores de continuidad inventados alrededor de un paquete con TEI", a.ccErrs)
+	}
+}
+
+// Un empalme declarado —publicidad, ventana regional, un encoder que
+// rearranca— deja el reloj de la PAT anclado antes del salto, y la siguiente
+// PAT medía el salto entero como si la tabla hubiera desaparecido: un aviso de
+// Prioridad 1 de treinta segundos en cada corte publicitario.
+func TestDeclaredSpliceDoesNotInventAPATFailure(t *testing.T) {
+	a := newTSAnalyzer()
+	pcr := func(ms float64) uint64 { return uint64(ms*pcrPerMs) + 1 }
+	ccPat := uint8(0)
+	pat := func() []byte {
+		p := mkTS(paq{pid: patPID, cc: ccPat, payload: true, pusi: true,
+			datos: conPointer(patSection(1, 4096))})
+		ccPat = (ccPat + 1) & 0x0F
+		return p
+	}
+	// Flujo normal: PCR cada 20 ms, PAT por medio.
+	for i := 0; i < 5; i++ {
+		a.feed(mkTS(paq{pid: 100, cc: uint8(i), payload: true, tienePCR: true, pcr: pcr(float64(i) * 20)}))
+		a.feed(pat())
+	}
+	// Empalme DECLARADO de +30 s, y el flujo sigue.
+	a.feed(mkTS(paq{pid: 100, cc: 5, payload: true, tienePCR: true, pcr: pcr(30100), discont: true}))
+	for i := 0; i < 5; i++ {
+		a.feed(pat())
+		a.feed(mkTS(paq{pid: 100, cc: uint8(6 + i), payload: true, tienePCR: true,
+			pcr: pcr(30120 + float64(i)*20)}))
+	}
+
+	if got := a.snapshot(); got != "" {
+		t.Errorf("un empalme declarado ha inventado un fallo: %q", got)
+	}
+}
+
+// La comprobación de PAT medía el hueco ENTRE dos tablas, así que si la PAT
+// desaparecía del todo no se medía nada y no se avisaba — justo lo que la
+// comprobación existe para ver.
+func TestVanishedPATIsReported(t *testing.T) {
+	a := newTSAnalyzer()
+	pcr := func(ms float64) uint64 { return uint64(ms*pcrPerMs) + 1 }
+	a.feed(mkTS(paq{pid: patPID, cc: 0, payload: true, pusi: true,
+		datos: conPointer(patSection(1, 4096))}))
+	// Y a partir de aquí, dos segundos de flujo sin una sola PAT.
+	for i := 0; i < 100; i++ {
+		a.feed(mkTS(paq{pid: 100, cc: uint8(i & 0x0F), payload: true,
+			tienePCR: true, pcr: pcr(float64(i) * 20)}))
+	}
+	got := a.snapshot()
+	if !strings.Contains(got, "PAT") {
+		t.Errorf("la PAT ha desaparecido y no se avisa: %q", got)
+	}
+}
+
+// Un datagrama RTP con UN solo paquete TS mide 12+188 = 200 bytes exactos. Con
+// un `>` en vez de `>=` se rechazaba entero, y un canal emitido así se
+// informaba como "no es MPEG-TS" de principio a fin.
+func TestSingleTSPacketOverRTPIsRecognised(t *testing.T) {
+	d := make([]byte, rtpHeaderLen+tsPacket)
+	d[0], d[1] = 0x80, rtpPayloadTypeMP2T
+	copy(d[rtpHeaderLen:], mkTS(paq{pid: 101, cc: 0, payload: true}))
+
+	if got := payloadOf(d); len(got) != tsPacket {
+		t.Fatalf("RTP con un paquete TS: devuelve %d bytes, quiero %d", len(got), tsPacket)
+	}
+	a := newTSAnalyzer()
+	a.feed(d)
+	if a.notTS != 0 {
+		t.Errorf("un datagrama RTP válido se ha contado como basura")
+	}
+}
+
+// La PAT viene de la red y no se le verifica el CRC, así que una corrupta puede
+// declarar hasta 65.535 programas. Antes cada uno se guardaba y maybePMT
+// barría el mapa entero por CADA paquete con payload: entrada de red que
+// degrada el bucle de reenvío.
+func TestProgramMapIsBounded(t *testing.T) {
+	a := newTSAnalyzer()
+	for n := 1; n <= 3000; n++ {
+		a.feed(mkTS(paq{pid: patPID, cc: uint8(n & 0x0F), payload: true, pusi: true,
+			datos: conPointer(patSection(uint16(n), uint16(4096+n%100)))}))
+	}
+	if len(a.programs) > maxPrograms {
+		t.Errorf("el mapa de programas ha crecido a %d desde la red (tope %d)", len(a.programs), maxPrograms)
+	}
+}
+
+// Un programa cuya PMT no llega no puede silenciar el informe de los demás.
+func TestContentsReportsTheProgrammesItKnows(t *testing.T) {
+	a := newTSAnalyzer()
+	// Dos programas en la PAT, PMT de uno solo.
+	a.feed(mkTS(paq{pid: patPID, cc: 0, payload: true, pusi: true,
+		datos: conPointer(patSection(1, 4096))}))
+	a.feed(mkTS(paq{pid: patPID, cc: 1, payload: true, pusi: true,
+		datos: conPointer(patSection(2, 4097))}))
+	a.feed(mkTS(paq{pid: 4096, cc: 0, payload: true, pusi: true,
+		datos: conPointer(pmtSection(101, map[uint16]uint8{101: 0x1B}))}))
+
+	got := a.contents()
+	if !strings.Contains(got, "H.264") {
+		t.Errorf("el programa con PMT conocida no se informa: %q", got)
 	}
 }

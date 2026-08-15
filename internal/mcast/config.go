@@ -72,10 +72,11 @@ type EffCfg struct {
 	// "el relé va bien" de "la señal va bien".
 	//
 	// Va activo por defecto porque su valor está justo en enterarse sin ir a
-	// mirar, y porque el coste está medido: 161 ns por datagrama de 1316 bytes
-	// (BenchmarkAnalyzerFeed), que a 10 Mbps son 950 datagramas por segundo y
-	// canal, o sea el 0,015 % de un núcleo. Se puede apagar de todas formas: en
-	// un relé, cualquier cosa que no sea reenviar es opcional por principio.
+	// mirar, y porque el coste está medido: 192 ns por datagrama de 1316 bytes
+	// (BenchmarkAnalyzerFeed, con PAT y PMT ya parseadas), que a 10 Mbps son
+	// 950 datagramas por segundo y canal, o sea el 0,018 % de un núcleo. Se
+	// puede apagar de todas formas: en un relé, cualquier cosa que no sea
+	// reenviar es opcional por principio.
 	Analyze bool
 }
 

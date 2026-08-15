@@ -129,6 +129,7 @@ type msgs struct {
 	logTSPCRJump    string
 	logTSPCRGap     string
 	logTSPATGap     string
+	logTSPATGone    string
 	logTSNoPCR      string
 	logTSPCRNoExt   string
 	logTSScrambled  string
@@ -251,6 +252,7 @@ var msgsEN = msgs{
 	logTSPCRJump:     "%d PCR jumps with no discontinuity_indicator",
 	logTSPCRGap:      "%d PCR intervals above the limit, peak %.0f ms (max %d)",
 	logTSPATGap:      "%d PAT intervals above the limit, peak %.0f ms (max %d)",
+	logTSPATGone:     "no PAT for %.0f ms (max %d): the stream cannot be tuned",
 	logTSNoPCR:       "no PCR: nothing to pace or lock to",
 	logTSPCRNoExt:    "PCR with no 27 MHz extension: clock quantised to 90 kHz",
 	logTSScrambled:   "%d scrambled packets",
@@ -377,6 +379,7 @@ var msgsES = msgs{
 	logTSPCRJump:     "%d saltos de PCR sin discontinuity_indicator",
 	logTSPCRGap:      "%d intervalos de PCR por encima del límite, máx %.0f ms (tope %d)",
 	logTSPATGap:      "%d intervalos de PAT por encima del límite, máx %.0f ms (tope %d)",
+	logTSPATGone:     "sin PAT desde hace %.0f ms (tope %d): el flujo no se puede sintonizar",
 	logTSNoPCR:       "sin PCR: no hay reloj al que engancharse",
 	logTSPCRNoExt:    "PCR sin extensión de 27 MHz: reloj cuantizado a 90 kHz",
 	logTSScrambled:   "%d paquetes cifrados",

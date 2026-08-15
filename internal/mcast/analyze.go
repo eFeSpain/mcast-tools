@@ -38,6 +38,16 @@ const (
 
 	// pcrPerMs son las unidades de PCR que caben en un milisegundo.
 	pcrPerMs = pcrClockHz / 1000
+
+	// pcrModulus es el recorrido completo del PCR: 33 bits de base a 90 kHz por
+	// 300 de extensión. Da la vuelta cada ~26,5 h.
+	pcrModulus = int64(1<<33) * 300
+
+	// maxPrograms acota lo que se guarda de la PAT. Las secciones vienen de la
+	// red y no se les verifica el CRC, así que una corrupta —o inyectada a
+	// propósito en el grupo— puede declarar hasta 65.535 programas. Un multiplex
+	// real no pasa de unas decenas.
+	maxPrograms = 64
 )
 
 // pidState es lo que hay que recordar de cada PID entre paquete y paquete.
@@ -97,15 +107,25 @@ type tsAnalyzer struct {
 	patMaxGapMs float64
 	patOver     uint64
 
-	// Contenido, tal como lo declara la PMT.
+	// Contenido, tal como lo declara la PMT. porPMT es el índice por PID de la
+	// tabla: sin él había que barrer el mapa entero por CADA paquete con
+	// payload para ver si ese PID era una PMT, y como el mapa lo llena la PAT
+	// —que llega de la red y no lleva CRC verificado—, bastaba con inyectar
+	// PAT corruptas al grupo para convertir un O(1) en un O(programas) dentro
+	// del bucle de reenvío.
 	programs map[uint16]*program
+	porPMT   map[uint16]*program
 	// reported dice si ya se ha registrado el contenido: es una línea de log de
 	// una sola vez, no algo que repetir cada diez segundos.
 	reported bool
 	// Estas dos describen el flujo, no un suceso del intervalo, así que se
 	// avisan por flanco. Sobreviven al reinicio de contadores de snapshot.
-	noPCRAvisado bool
-	noExtAvisado bool
+	noPCRAvisado   bool
+	noExtAvisado   bool
+	cifradoAvisado bool
+	// patVisto sobrevive al reinicio de contadores: dice que este flujo lleva
+	// PAT, aunque en este intervalo no haya pasado ninguna.
+	patVisto bool
 }
 
 type program struct {
@@ -119,6 +139,7 @@ func newTSAnalyzer() *tsAnalyzer {
 	return &tsAnalyzer{
 		pids:     make(map[uint16]*pidState),
 		programs: make(map[uint16]*program),
+		porPMT:   make(map[uint16]*program),
 	}
 }
 
@@ -135,7 +156,10 @@ func payloadOf(d []byte) []byte {
 	// RTP: versión 2 en los dos bits altos, y detrás tiene que empezar un
 	// paquete TS. Solo se reconoce la cabecera fija de 12 bytes sin CSRC ni
 	// extensión, que es lo que usa MPEG-TS sobre RTP (RFC 2250).
-	if len(d) > rtpHeaderLen+tsPacket && d[0]&0xC0 == 0x80 && d[0]&0x0F == 0 &&
+	// El >= es deliberado: con > se rechazaba el datagrama de UN solo paquete
+	// TS sobre RTP (12 + 188 = 200 bytes exactos), y un canal emitido así se
+	// informaba entero como "no es MPEG-TS".
+	if len(d) >= rtpHeaderLen+tsPacket && d[0]&0xC0 == 0x80 && d[0]&0x0F == 0 &&
 		d[0]&0x10 == 0 && d[rtpHeaderLen] == 0x47 {
 		return d[rtpHeaderLen:]
 	}
@@ -170,14 +194,21 @@ func (a *tsAnalyzer) packet(p []byte) {
 		return
 	}
 	a.packets++
+	pid := uint16(p[1]&0x1F)<<8 | uint16(p[2])
 
 	if p[1]&0x80 != 0 { // transport_error_indicator
 		a.teiErrs++
-		// Un paquete marcado como corrupto no dice nada fiable de su contenido:
-		// contarlo como salto de continuidad sería duplicar el mismo suceso.
+		// Un paquete marcado como corrupto no dice nada fiable de su contenido,
+		// pero su hueco en el contador de continuidad se ha gastado igual.
+		// Ignorarlo a secas hacía que el SIGUIENTE paquete bueno llegara con el
+		// contador dos por delante y se contara como pérdida: un solo suceso
+		// producía dos avisos, uno de ellos inventado. Se olvida el contador de
+		// ese PID y se vuelve a anclar con el próximo.
+		if st := a.pids[pid]; st != nil {
+			st.haveCC = false
+		}
 		return
 	}
-	pid := uint16(p[1]&0x1F)<<8 | uint16(p[2])
 	if pid == nullPID {
 		a.nulls++
 		return // los nulos no llevan contador de continuidad definido
@@ -273,19 +304,40 @@ func (a *tsAnalyzer) clock(pid uint16, p []byte, discontinuo bool) {
 	}
 	if !a.havePCR {
 		a.havePCR, a.pcrPID, a.lastPCR = true, pid, v
+		// La PAT suele pasar antes que el primer PCR, y entonces se quedaba sin
+		// referencia con la que medirse: nunca se anclaba y la comprobación de
+		// PAT no llegaba a ejecutarse en toda la vida del canal. Se ancla aquí.
+		if a.patVisto && !a.havePatPCR {
+			a.patLastPCR, a.havePatPCR = v, true
+		}
 		return
 	}
 	d := int64(v) - int64(a.lastPCR)
 	a.lastPCR = v
+	if d < 0 {
+		// El contador de 33 bits da la vuelta cada ~26,5 h. Eso es aritmética
+		// modular, no una discontinuidad: si al sumar el módulo sale un
+		// intervalo plausible, ha dado la vuelta y el flujo está perfectamente
+		// sano. Sin esto, todo canal escribía un aviso de salto de reloj cada
+		// veintiséis horas y media sin que pasara absolutamente nada.
+		if w := d + pcrModulus; w > 0 && w <= maxPCRJump {
+			d = w
+		}
+	}
 	if d <= 0 || d > maxPCRJump {
 		if !discontinuo {
-			// Salto sin bandera: o el contador de 33 bits ha dado la vuelta
-			// —cada ~26 h, y entonces debería venir declarado— o alguien ha
-			// empalmado material sin avisar. Es lo que descoloca el PLL del
+			// Salto de verdad: material empalmado sin avisar, o un encoder que
+			// rearranca con otro reloj. Es lo que descoloca el PLL del
 			// decodificador.
 			a.pcrJumps++
 		}
-		return // el intervalo de un salto no mide nada
+		// El intervalo de un salto no mide nada, y la referencia de la PAT
+		// tampoco: está anclada al reloj de ANTES del salto, así que la
+		// siguiente PAT mediría el salto entero como si la tabla hubiera
+		// desaparecido. Un corte publicitario declarado inventaba así un fallo
+		// de Prioridad 1 de treinta segundos.
+		a.havePatPCR = false
+		return
 	}
 	ms := float64(d) / pcrPerMs
 	if ms > a.pcrMaxGapMs {
@@ -347,6 +399,7 @@ func (a *tsAnalyzer) pat(p []byte) {
 		a.patLastPCR, a.havePatPCR = a.lastPCR, true
 	}
 	a.patCount++
+	a.patVisto = true
 
 	s := section(p)
 	// La longitud se comprueba siempre: esto parsea lo que llega de la red, y
@@ -364,20 +417,17 @@ func (a *tsAnalyzer) pat(p []byte) {
 		if num == 0 {
 			continue // program_number 0 es la NIT, no un programa
 		}
-		if _, ya := a.programs[num]; !ya {
-			a.programs[num] = &program{number: num, pmtPID: pmt, streams: map[uint16]uint8{}}
+		if _, ya := a.programs[num]; ya || len(a.programs) >= maxPrograms {
+			continue
 		}
+		pr := &program{number: num, pmtPID: pmt, streams: map[uint16]uint8{}}
+		a.programs[num] = pr
+		a.porPMT[pmt] = pr
 	}
 }
 
 func (a *tsAnalyzer) maybePMT(pid uint16, p []byte) {
-	var pr *program
-	for _, x := range a.programs {
-		if x.pmtPID == pid {
-			pr = x
-			break
-		}
-	}
+	pr := a.porPMT[pid]
 	if pr == nil {
 		return
 	}
@@ -407,10 +457,14 @@ func (a *tsAnalyzer) maybePMT(pid uint16, p []byte) {
 // distribución: para el resto vale más el número que una etiqueta inventada.
 func codecName(t uint8) string {
 	switch t {
-	case 0x01, 0x02:
+	case 0x01:
+		return "MPEG-1"
+	case 0x02:
 		return "MPEG-2"
-	case 0x03, 0x04:
-		return "MP2"
+	case 0x03:
+		return "MP1/MP2"
+	case 0x04:
+		return "MP2 (MPEG-2)"
 	case 0x0F:
 		return "AAC"
 	case 0x11:
@@ -446,8 +500,12 @@ func (a *tsAnalyzer) contents() string {
 	var partes []string
 	for _, n := range nums {
 		pr := a.programs[uint16(n)]
+		// Un programa cuya PMT aún no ha pasado se salta, no silencia a los
+		// demás. Antes se devolvía "" y bastaba con un programa cuya PMT no se
+		// llegara a parsear nunca —repartida entre paquetes, por ejemplo— para
+		// que el canal entero no informara jamás de su contenido.
 		if len(pr.streams) == 0 {
-			return "" // aún no ha llegado su PMT: se espera en vez de informar a medias
+			continue
 		}
 		pids := make([]int, 0, len(pr.streams))
 		for p := range pr.streams {
@@ -459,6 +517,9 @@ func (a *tsAnalyzer) contents() string {
 			comp = append(comp, fmt.Sprintf("%d %s", p, codecName(pr.streams[uint16(p)])))
 		}
 		partes = append(partes, fmt.Sprintf(txt.logTSProgram, n, pr.pcrPID, strings.Join(comp, " · ")))
+	}
+	if len(partes) == 0 {
+		return "" // ninguna PMT todavía: se espera en vez de informar a medias
 	}
 	a.reported = true
 	return strings.Join(partes, "; ")
@@ -513,8 +574,28 @@ func (a *tsAnalyzer) snapshot() string {
 	if a.pcrCount > 0 {
 		a.noExtAvisado = sinExt
 	}
-	if a.scrambled > 0 {
+	// El cifrado también es una propiedad, no un suceso: un canal de pago va
+	// cifrado por definición y con nivel escribía «66.489 paquetes cifrados»
+	// cada diez segundos para siempre. Esa línea es la MISMA en la que salen
+	// los errores de continuidad, así que a la semana el operador filtra "TS:"
+	// y el analizador entero deja de existir.
+	cifrado := a.scrambled > 0
+	if cifrado && !a.cifradoAvisado {
 		av = append(av, fmt.Sprintf(txt.logTSScrambled, a.scrambled))
+	}
+	if a.packets > 0 {
+		a.cifradoAvisado = cifrado
+	}
+	// PAT_error de verdad: lo de arriba mide el hueco ENTRE dos PAT, así que si
+	// la tabla desaparece del todo no se mide nada y no se avisa — justo lo que
+	// esta comprobación existe para ver. Aquí se mira el hueco entre la última
+	// PAT y el reloj de ahora.
+	if a.havePCR && a.havePatPCR {
+		if d := int64(a.lastPCR) - int64(a.patLastPCR); d > 0 {
+			if ms := float64(d) / pcrPerMs; ms > maxPATGap {
+				av = append(av, fmt.Sprintf(txt.logTSPATGone, ms, maxPATGap))
+			}
+		}
 	}
 
 	// Los contadores del intervalo se reinician; el estado que da continuidad
