@@ -19,6 +19,8 @@ jobs:
           out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "sin formatear:"; echo "$out"; exit 1; fi
       - run: go vet ./...
+      # Incluye la prueba extremo a extremo: mcast-send -> mcast-dup -> receptor,
+      # comprobando que no hay pérdidas, duplicados ni mezcla entre canales.
       - run: go test -race ./...
 
   cross:
@@ -40,7 +42,10 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-      - run: go build -o /dev/null .
+      - name: build both binaries
+        run: |
+          go build -o /dev/null ./cmd/mcast-dup
+          go build -o /dev/null ./cmd/mcast-send
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}

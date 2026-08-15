@@ -5,7 +5,8 @@
     "loop": true,
     "rcvbuf": 4194304,
     "sndbuf": 0,
-    "stats": 10
+    "stats": 10,
+    "watchdog": 60
   },
   "channels": [
     {

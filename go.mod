@@ -1,4 +1,4 @@
-module mcast-dup
+module mcast-tools
 
 go 1.26.3
 

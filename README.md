@@ -1,14 +1,40 @@
-# mcast-dup
+# mcast-tools
 
 **Español** · [English](README.en.md)
 
 [![CI](https://github.com/eFeSpain/mcast-dup/actions/workflows/ci.yml/badge.svg)](https://github.com/eFeSpain/mcast-dup/actions/workflows/ci.yml)
 
-Duplica flujos multicast UDP: recibe un grupo y reenvía cada datagrama tal cual
-a uno o varios grupos distintos. Sin recodificar y sin tocar el payload.
+Dos herramientas de línea de órdenes para operar multicast UDP en redes de
+vídeo. Binarios estáticos sin dependencias en tiempo de ejecución, N canales por
+proceso y recarga en caliente con SIGHUP.
 
-Un binario estático sin dependencias en tiempo de ejecución, N canales en un
-solo proceso y recarga en caliente con SIGHUP.
+| | |
+|---|---|
+| **[`mcast-dup`](#mcast-dup)** | Duplica: recibe un grupo y reenvía cada datagrama tal cual a uno o varios grupos distintos, sin recodificar. |
+| **[`mcast-send`](#mcast-send)** | Emite: manda un fichero, la entrada estándar o un patrón generado a un grupo, al bitrate que le pidas. |
+
+```
+                    ┌──►  239.255.0.1:1234
+fichero.ts          │
+   │                │
+   ▼                │
+mcast-send ──► 239.0.10.1:5000 ──► mcast-dup ──┤
+                                               │
+                                               └──►  239.255.1.1:1234
+```
+
+Comparten `internal/mcast`: configuración, resolución de interfaz, sockets,
+orquestación de canales, estadísticas y mensajes. Un arreglo en la capa común
+llega a los dos, pero cada binario se instala y se ejecuta por separado.
+
+---
+
+<a name="mcast-dup"></a>
+
+## mcast-dup
+
+Recibe un grupo y reenvía cada datagrama tal cual a uno o varios grupos
+distintos. Sin recodificar y sin tocar el payload.
 
 ```
 239.0.10.1:5000  ──►  mcast-dup  ──┬──►  239.255.0.1:1234
@@ -40,10 +66,11 @@ cortar los que no cambian.
 
 ```sh
 go mod download
-CGO_ENABLED=0 go build -o mcast-dup .
+CGO_ENABLED=0 go build -o mcast-dup  ./cmd/mcast-dup
+CGO_ENABLED=0 go build -o mcast-send ./cmd/mcast-send
 
 # cruzado, para un servidor Linux
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o mcast-dup .
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o mcast-dup ./cmd/mcast-dup
 ```
 
 ## Uso
@@ -59,12 +86,13 @@ mcast-dup -s 239.0.10.1:5000 -d 239.255.0.1:1234,239.255.1.1:1234 \
 |---|---|---|
 | `-s` | — | origen `GRUPO:PUERTO` (obligatorio) |
 | `-d` | — | destino(s) `GRUPO:PUERTO`, separados por comas (obligatorio) |
-| `-iface` | auto | IP local de la NIC que se usa para recibir y emitir |
+| `-iface` | auto | NIC para recibir y emitir: IP local (`10.30.0.5`) o nombre (`eth0`) |
 | `-ttl` | 8 | TTL multicast de salida |
 | `-loop` | true | loopback multicast local |
 | `-rcvbuf` | 4 MiB | `SO_RCVBUF` del socket de recepción |
 | `-sndbuf` | 0 | `SO_SNDBUF` (0 = no tocarlo) |
 | `-stats` | 10 | segundos entre resúmenes (0 los apaga) |
+| `-watchdog` | 60 | segundos sin recibir nada antes de rehacer el socket (0 lo desactiva) |
 | `-logfile` | — | escribir los logs a un fichero en vez de stdout/stderr |
 | `-lang` | auto | idioma de los mensajes: `auto`, `es` o `en` |
 
@@ -95,26 +123,72 @@ necesite.
 
 | Campo | Ámbito | Por defecto | Qué hace |
 |---|---|---|---|
-| `iface` | ambos | auto | IP local de la NIC (rx y tx) |
+| `iface` | ambos | auto | NIC para rx y tx: IP local o nombre de la interfaz |
 | `ttl` | ambos | 8 | TTL multicast de salida |
 | `loop` | ambos | true | loopback multicast local |
 | `rcvbuf` | ambos | 4194304 | `SO_RCVBUF` en bytes |
 | `sndbuf` | ambos | 0 | `SO_SNDBUF` en bytes (0 = no tocarlo) |
 | `stats` | defaults | 10 | segundos entre resúmenes (0 los apaga) |
-| `name` | canal | `ch1`, `ch2`… | nombre en los logs; identifica el canal en las recargas |
+| `watchdog` | ambos | 60 | segundos sin recibir nada antes de rehacer el socket (0 lo desactiva) |
+| `name` | canal | el `source` | nombre en los logs; identifica el canal en las recargas |
 | `source` | canal | obligatorio | `GRUPO:PUERTO` de origen, tiene que ser multicast |
 | `dest` | canal | obligatorio | lista de `GRUPO:PUERTO` destino (también vale unicast) |
+
+### Filtrar por emisor (SSM)
+
+Con `from` en un canal, solo se acepta el grupo si viene de esos emisores:
+
+```json
+{ "name": "la1-hd", "source": "232.1.2.3:5000", "dest": ["239.255.0.1:1234"],
+  "from": ["10.20.30.40"] }
+```
+
+Se hace en dos capas. Primero se intenta un **join por fuente** (SSM, RFC 4607):
+el kernel filtra, y con IGMPv3 en la red el switch ni siquiera nos manda el
+tráfico de otros emisores. Y además se **comprueba siempre aquí**, en el bucle
+de recepción, porque si la red no habla IGMPv3 el kernel puede entregar tráfico
+de otros de todas formas.
+
+Esto tapa un agujero que el filtro por destino no cubre: aquel bloquea lo que no
+va dirigido al grupo, pero no hace nada contra un **emisor equivocado emitiendo
+al grupo correcto** — el encoder de respaldo mal configurado que emite en
+paralelo, y el decodificador viendo errores de continuidad imposibles de
+explicar.
+
+En Windows `x/net` no implementa el join por fuente: allí se une al grupo entero
+y filtra en userspace, avisando por log de que no está cortando el tráfico
+aguas arriba.
 
 ### Qué se valida, al arrancar y en cada recarga
 
 - El origen tiene que ser una dirección multicast.
+- Las direcciones de `from` tienen que ser unicast: un grupo o un `0.0.0.0` ahí
+  no filtran nada.
+- El `ttl` tiene que estar en `[0,255]`. Fuera de rango el kernel rechaza la
+  opción y el socket se queda en TTL 1 sin que nadie se entere, así que el
+  canal se rechaza en vez de emitir en silencio donde no debe.
 - Se rechaza cualquier canal que **cree un bucle de realimentación**: un
   destino que vuelva, directa o indirectamente, al origen del propio canal.
   Con el loopback activado eso multiplica el flujo en cada vuelta hasta saturar
-  la NIC. Una cascada legítima (el canal A alimenta el grupo que lee el canal
-  B) sí se permite.
+  la NIC. Cuenta también el bucle que se cuela por la puerta del unicast: un
+  destino como `127.0.0.1:5000` o `<IP-de-esta-máquina>:5000`, cuando 5000 es
+  el puerto de origen de algún canal, vuelve a entrar por el socket de
+  recepción exactamente igual. Una cascada legítima (el canal A alimenta el
+  grupo que lee el canal B) sí se permite.
+- Las direcciones tienen que llevar puerto. Un `239.0.10.1:0` se aceptaba y
+  luego bindeaba a un puerto efímero: el canal se unía al grupo y no recibía un
+  solo datagrama, con aspecto de estar sano.
+- Un `stats` disparatado se acota a 24 h en vez de desbordar el temporizador.
+- Los destinos repetidos dentro de un canal se descartan con aviso: emitirían
+  cada paquete dos veces al mismo sitio.
 - Los canales con nombre duplicado o direcciones inválidas se descartan con un
-  aviso, sin tumbar a los demás.
+  aviso, sin tumbar a los demás. Si un canal no lleva `name`, se le pone el de
+  su `source`: un nombre derivado de la posición en el array haría que insertar
+  un canal renombrara a los siguientes y el SIGHUP los reiniciara todos.
+- Los campos que el programa no conoce se avisan pero **no** son fatales: un
+  `"defualts"` mal escrito perdería el bloque entero en silencio, y ahora se
+  ve en el log; pero una clave tipo `"_comment"` (JSON no tiene comentarios)
+  no tumba la configuración.
 
 En modo flags cualquier problema es fatal y el proceso sale con código 2. En
 modo daemon se ignora el canal afectado y el resto sigue.
@@ -123,18 +197,166 @@ modo daemon se ignora el canal afectado y el resto sigue.
 
 `SIGHUP` arranca los canales nuevos, para los que desaparecen y reinicia solo
 los que han cambiado, esperando a que el canal viejo cierre sus sockets antes
-de arrancar el relevo. Un JSON inválido no tumba nada: se avisa por log y sigue
-en pie la configuración anterior.
+de arrancar el relevo.
+
+SIGHUP hace además lo que se espera convencionalmente de esa señal: **reabre el
+fichero de `-logfile`**. Sin eso, tras un `logrotate` el proceso seguiría
+escribiendo al inodo viejo hasta el siguiente reinicio. En modo flags no hay
+nada que recargar, así que SIGHUP solo reabre el log y lo dice — antes mataba
+el proceso.
+
+Nada de lo que ya está emitiendo se corta por un error de edición:
+
+- Un JSON inválido no tumba nada: se avisa y sigue en pie la configuración
+  anterior.
+- Un canal que **sí sigue en el fichero pero cuya configuración nueva no
+  valida** se queda como estaba, emitiendo, y se avisa por log. Solo se paran
+  los canales que desaparecen del fichero, que es una decisión deliberada.
+
+### Las estadísticas
+
+```
+[13:54:42] la1-hd              950 pkt/s · rx   9.98 Mbps · tx  29.94 Mbps · 0 err · 3 drop
+```
+
+`rx` es lo que entra y `tx` lo que sale de verdad, medido: con tres destinos el
+enlace lleva el triple de lo que se recibe, y es `tx` lo que hay que comparar
+con la capacidad del enlace.
+
+`err` y `drop` son **cuentas del intervalo, no tasas**, a propósito: son sucesos
+raros y como tasa se redondearían a cero — un error cada diez segundos son
+`0,1 err/s`, que se imprime `0` y no lo ves nunca. `err` son fallos de envío y
+`drop`, datagramas descartados por no ir dirigidos al grupo del canal.
+
+Cuando hay algún `err`, la siguiente línea del log trae el motivo real del
+último fallo (`network is unreachable` y compañía), no solo el contador.
+
+### Vigilancia de recepción (`watchdog`)
+
+Si la NIC se recrea con otro ifindex o cambia de IP, la pertenencia al grupo
+queda huérfana y el socket no vuelve a recibir nada, para siempre y en
+silencio. Con `watchdog` segundos sin un solo datagrama, el canal rehace el
+socket, vuelve a resolver la interfaz y repite el join. El aviso se registra
+**una vez por episodio**, no en cada reintento, para que un canal apagado de
+madrugada no llene el log.
+
+Ponlo a 0 si tienes canales que legítimamente pasan horas mudos y prefieres no
+tocar nada.
+
+---
+
+<a name="mcast-send"></a>
+
+## mcast-send
+
+Emite un flujo multicast al bitrate que le pidas. Tres orígenes posibles:
+
+```sh
+# un fichero, en bucle
+mcast-send -d 239.0.10.1:5000 -f barras.ts -b 10M -iface eth0
+
+# lo que le llegue por la entrada estándar
+ffmpeg -re -i entrada.mp4 -c copy -f mpegts - | mcast-send -d 239.0.10.1:5000 -stdin -b 8M
+
+# un patrón numerado, sin necesidad de material
+mcast-send -d 239.0.99.1:5000 -b 2M
+```
+
+| Opción | Por defecto | Qué hace |
+|---|---|---|
+| `-d` | — | destino `GRUPO:PUERTO` (obligatorio) |
+| `-f` | — | fichero a emitir |
+| `-stdin` | false | leer de la entrada estándar |
+| `-b` | 10M | bitrate: bits/s o con sufijo (`10M`, `512k`, `2.5M`) |
+| `-size` | 1316 | bytes de payload por datagrama (1316 = 7 paquetes TS) |
+| `-loop-file` | true | volver a empezar el fichero al terminarlo |
+| `-iface`, `-ttl`, `-loop`, `-sndbuf`, `-stats`, `-logfile`, `-lang` | | como en `mcast-dup` |
+
+Sin `-f` ni `-stdin` emite un **patrón numerado**: cada datagrama lleva su
+número de secuencia en los 8 primeros bytes, así que en el otro extremo se puede
+comprobar que no falta ninguno, que no se repiten y que llegan en orden. Es lo
+que usa la prueba automática del repositorio.
+
+### Es un bombeador de bytes, no un multiplexor
+
+`mcast-send` trocea y pacea; no parsea nada. Con eso cubre el caso normal de
+IPTV —MPEG-TS sobre UDP crudo— pero conviene saber qué **no** hace: ni RTP, ni
+FEC (SMPTE 2022), ni SRT/RIST, ni remultiplexado, ni transcodificación, ni
+bitrate variable guiado por el PCR. Si le pides 10 Mbps a un TS que en realidad
+son 6, lo emitirás 1,6 veces más rápido y le reventarás el búfer al
+decodificador: el bitrate correcto lo pones tú.
+
+Por eso el tamaño por defecto es **1316 = 7 × 188**, un número entero de
+paquetes TS. Si el material parece un transport stream —se comprueba mirando los
+bytes de sincronismo `0x47`— y la alineación no cuadra, se avisa:
+
+```
+config: channel 'barras': /srv/barras.ts looks like MPEG-TS, but the datagram
+        size (1400) is not a multiple of 188: TS packets would be split across
+        datagrams and no decoder could read the stream
+```
+
+Y lo mismo si la **longitud del fichero** no es múltiplo de 188: cada vuelta del
+bucle emitiría un paquete cortado. Son avisos y no rechazos, porque emitir algo
+que no sea TS con el tamaño que quieras es un uso legítimo — y precisamente por
+eso el aviso solo aparece cuando el fichero parece TS de verdad.
+
+Es la clase de fallo más traicionera: el flujo sale a su bitrate, con cero
+errores en las estadísticas, y sencillamente no hay decodificador que lo lea.
+
+### El modo daemon es igual que el del relé
+
+```sh
+mcast-send -config /etc/mcast-send.json
+systemctl reload mcast-send
+```
+
+Ver [`mcast-send.example.json`](mcast-send.example.json). Mismas reglas:
+`defaults` más overrides por canal, recarga sin cortar lo que no cambia, un
+canal cuya config nueva no valida se queda como estaba, y validación por
+adelantado de lo que no puede funcionar (destino sin puerto, bitrate ilegible,
+fichero que no se puede leer, dos canales al mismo destino).
+
+| Campo | Ámbito | Por defecto | Qué hace |
+|---|---|---|---|
+| `dest` | canal | obligatorio | `GRUPO:PUERTO` al que emitir |
+| `file` | canal | — | fichero a emitir |
+| `loop` | canal | true | repetir el fichero al acabarlo |
+| `stdin` | canal | false | leer de la entrada estándar |
+| `bitrate` | ambos | `10M` | bits/s o con sufijo |
+| `size` | ambos | 1316 | bytes de payload por datagrama |
+| `iface`, `ttl`, `loopback`, `sndbuf`, `stats` | ambos | | como en el relé |
+
+### Por qué emitir es más difícil que reenviar
+
+El relé va **paceado por su entrada**: reenvía cuando llega algo, y el reloj lo
+pone el emisor original. Un emisor tiene que **poner su propio reloj**, y ahí
+está toda la dificultad.
+
+Un TS a 10 Mbps con payload de 1316 bytes son ~950 paquetes/s: uno cada 1,05 ms.
+Dormir «un intervalo» en cada vuelta no vale, porque la deriva de cada sueño se
+acumula y en una hora vas minutos desfasado. `mcast-send` usa un **reloj
+absoluto**: calcula cuándo debería salir el paquete N contando desde el
+arranque, así el error de un sueño se corrige solo en la vuelta siguiente.
+
+Medido con los binarios reales: pedidos 4 Mbps, emitidos 380 pkt/s × 1316 B =
+**4,00 Mbps**, y el relé al otro lado marcando `rx 4.00 · tx 4.00`.
+
+---
 
 ## systemd
 
 ```sh
-install -m 0755 mcast-dup /usr/local/bin/
-install -m 0644 mcast-dup.example.json /etc/mcast-dup.json
-install -m 0644 mcast-dup.service /etc/systemd/system/
+install -m 0755 mcast-dup mcast-send /usr/local/bin/
+install -m 0644 mcast-dup.example.json  /etc/mcast-dup.json
+install -m 0644 mcast-send.example.json /etc/mcast-send.json
+install -m 0644 mcast-dup.service mcast-send.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now mcast-dup
 systemctl reload mcast-dup        # tras editar /etc/mcast-dup.json
 ```
+
+Cada herramienta tiene su unidad, su fichero de configuración y su ciclo de
+vida: en un servidor que solo reemite no hace falta instalar el emisor.
 
 ## Ajustes de red
 
@@ -179,6 +401,25 @@ Windows y los BSD no necesitan nada de esto: entregan a cada socket solo los
 grupos que ese socket unió. Comprobado en Windows; en BSD es el comportamiento
 que precisamente motivó que Linux añadiera la opción.
 
+### Y el mismo bind al comodín deja otra puerta abierta
+
+`IP_MULTICAST_ALL=0` arregla la mezcla **entre grupos**, pero no toca el
+unicast: un socket en `0.0.0.0:5000` sigue recibiendo lo que se mande a la IP
+de la máquina en ese puerto, y el broadcast. Sin mirar la dirección de destino,
+el relé reenviaría ese tráfico ajeno dentro del grupo multicast. Medido: tres
+datagramas unicast enviados a `<IP-del-relé>:5000` aparecían íntegros en el
+grupo destino.
+
+Por eso el socket de recepción pide la dirección de destino de cada datagrama
+(`IP_PKTINFO`, vía `SetControlMessage(ipv4.FlagDst, true)`) y descarta lo que no
+venga dirigido al grupo del canal. Los descartes se cuentan y salen en las
+estadísticas como `drop/s`, así que un `ffmpeg` mal apuntado o un escaneo UDP se
+ven en el log en vez de acabar dentro del transport stream.
+
+En Windows esto no es posible: `x/net/ipv4` no implementa `SetControlMessage`
+(devuelve `errNotImplemented`), así que allí el filtro se desactiva y el
+arranque lo avisa explícitamente por canal.
+
 ## Limitaciones
 
 - **Solo IPv4.**
@@ -187,10 +428,12 @@ que precisamente motivó que Linux añadiera la opción.
 - **Una syscall por paquete y destino.** No usa `recvmmsg`/`sendmmsg`. Sobra
   para decenas de canales; si necesitas cientos, el techo está aquí.
 - **Linux es la plataforma principal.** Compila y funciona en Windows y
-  macOS/BSD, pero en Windows no existe `SIGHUP`: no hay recarga en caliente.
-- Los tests automáticos cubren validación, filtrado por grupo, parada de
-  canales, estadísticas y traducciones. El camino de datos en sí está
-  verificado a mano.
+  macOS/BSD, pero en Windows no existe `SIGHUP` (no hay recarga en caliente) ni
+  se puede filtrar por dirección de destino (el arranque lo avisa).
+- El camino de datos **sí** está cubierto: la suite levanta `mcast-send`, un
+  `mcast-dup` y un receptor en el mismo proceso y comprueba que el patrón
+  numerado llega entero, sin duplicados, sin huecos y sin mezclarse con otro
+  grupo. Se salta sola si la máquina no tiene una NIC con multicast.
 
 ## Licencia
 

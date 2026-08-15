@@ -1,0 +1,31 @@
+{
+  "defaults": {
+    "iface": "10.30.0.5",
+    "ttl": 8,
+    "loopback": true,
+    "sndbuf": 0,
+    "stats": 10,
+    "size": 1316,
+    "bitrate": "10M"
+  },
+  "channels": [
+    {
+      "name": "barras",
+      "dest": "239.0.10.1:5000",
+      "file": "/srv/media/barras-1080i.ts",
+      "loop": true
+    },
+    {
+      "name": "carta-ajuste",
+      "dest": "239.0.10.2:5000",
+      "file": "/srv/media/carta.ts",
+      "bitrate": "4M",
+      "ttl": 2
+    },
+    {
+      "name": "patron-pruebas",
+      "dest": "239.0.99.1:5000",
+      "bitrate": "2M"
+    }
+  ]
+}

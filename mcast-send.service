@@ -1,0 +1,32 @@
+[Unit]
+Description=mcast-send — emisor de flujos multicast UDP
+Documentation=https://github.com/eFeSpain/mcast-dup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# systemd no propaga LANG, así que los mensajes saldrán en inglés. Para verlos
+# en español, añade -lang es aquí o descomenta el Environment de abajo.
+ExecStart=/usr/local/bin/mcast-send -config /etc/mcast-send.json
+# Environment=LANG=es_ES.UTF-8
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+
+# Solo necesita red y leer el material que emite.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+# Directorio del material a emitir, en solo lectura:
+# ReadOnlyPaths=/srv/media
+
+[Install]
+WantedBy=multi-user.target
