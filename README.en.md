@@ -264,7 +264,7 @@ mcast-send -d 239.0.10.1:5000 -f bars.ts -b 10M -iface eth0
 
 # any other format: ffmpeg remuxes it and mcast-send supervises it
 mcast-send -d 239.0.10.1:5000 -b 8M \
-           -exec "ffmpeg -v quiet -re -i input.mp4 -c copy -f mpegts -"
+           -exec "ffmpeg -v quiet -re -i input.mp4 -c copy -f mpegts -muxrate 8000000 -"
 
 # whatever arrives on standard input
 ffmpeg -re -i input.mp4 -c copy -f mpegts - | mcast-send -d 239.0.10.1:5000 -stdin -b 8M
@@ -355,7 +355,51 @@ Each channel spawns its own, so this **does scale to multi-channel**, unlike
 
 The command does not go through a shell: it is split honouring quotes and
 executed directly. No `*` expansion, no pipes, no `&&` — and no injection from
-the config file either.
+the config file either. What whoever writes the JSON *can* do is run any binary
+they like: `exec` hands over process control, so the config file deserves the
+same permissions as the service itself.
+
+#### The ffmpeg command you actually need for broadcast
+
+`-c copy -f mpegts` fixes the **format**, which is what makes the stream
+readable. It leaves the **timing** half done, and that does not show until you
+measure it. Measured over 20 s of H.264 25 fps with a 2 s GOP plus AAC:
+
+| | `-c copy -f mpegts` | adding `-muxrate 6000000` | Reference |
+|---|---|---|---|
+| PCR repetition | 80.0 ms — **100 % out** | 20.0 ms — 0 % out | ≤ 40 ms |
+| PCR 27 MHz extension | **0 across all 250 samples** | present in 960 of 1004 | indispensable |
+| Rate between PCRs | 4.06 – 8.33 Mbps → **swings 2.1×** | 6.00 – 6.00 Mbps → 1.0× | constant |
+| Null packets | 0 | 8716 (10.9 %) | as many as needed |
+
+The second row is the one that decides it: **without `-muxrate`, ffmpeg does
+not compute the PCR's 27 MHz extension either**. Without it the clock is
+quantised to 90 kHz — 11.1 µs — twenty-two times above the PCR_accuracy
+tolerance TR 101 290 asks for. With `-muxrate` it computes it. Not sufficient
+for conformance, but impossible without.
+
+So the command for broadcast is:
+
+```sh
+ffmpeg -v quiet -re -i movie.mp4 -c copy -f mpegts \
+       -muxrate 6000000 -mpegts_flags +system_b -
+```
+
+And little else is needed: `-pat_period` (0.1 s) and `-sdt_period` (0.5 s)
+already ship with sane defaults, and `-pcr_period 20` is redundant — with
+`-muxrate` the output is byte-for-byte identical with and without it.
+`+system_b` is DVB signalling instead of the ATSC default.
+
+**The one delicate parameter is `-muxrate` itself, and undershooting is worse
+than omitting it.** Asking 4M of that same 5.36 Mbps stream makes ffmpeg warn
+`dts < pcr, TS is invalid` and stretch the timeline: 20 s of material came out
+spread over 26.9 s. The treacherous part is that the conformance metrics look
+impeccable — PCR every 19.9 ms, rate nailed to 4.00 Mbps — with the stream
+broken. Set it comfortably above the sum of the elementary streams; whatever is
+left over gets filled with null packets.
+
+With the output already CBR, `"bitrate": "pcr"` does what it promises: the pace
+comes from the multiplexer's clock rather than an estimate of yours.
 
 ### Let the stream set the pace: `"bitrate": "pcr"`
 

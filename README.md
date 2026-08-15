@@ -265,7 +265,7 @@ mcast-send -d 239.0.10.1:5000 -f barras.ts -b 10M -iface eth0
 
 # cualquier otro formato: ffmpeg lo remultiplexa y mcast-send lo supervisa
 mcast-send -d 239.0.10.1:5000 -b 8M \
-           -exec "ffmpeg -v quiet -re -i entrada.mp4 -c copy -f mpegts -"
+           -exec "ffmpeg -v quiet -re -i entrada.mp4 -c copy -f mpegts -muxrate 8000000 -"
 
 # lo que le llegue por la entrada estándar
 ffmpeg -re -i entrada.mp4 -c copy -f mpegts - | mcast-send -d 239.0.10.1:5000 -stdin -b 8M
@@ -356,7 +356,52 @@ de `-stdin`, del que solo puede tirar un canal por proceso.
 
 La orden no pasa por un intérprete: se parte respetando comillas y se ejecuta
 directamente. No hay expansión de `*`, ni tuberías, ni `&&` — y tampoco hay
-inyección desde el fichero de configuración.
+inyección desde el fichero de configuración. Lo que sí puede hacer quien
+escriba el JSON es ejecutar el binario que quiera: `exec` da el control del
+proceso, así que el fichero de configuración merece los mismos permisos que el
+propio servicio.
+
+#### La orden de ffmpeg que hace falta para señal de emisión
+
+`-c copy -f mpegts` arregla el **formato**, que es lo que hace legible el
+flujo. La **temporización** la deja a medias, y eso no se ve hasta que lo
+mides. Medido sobre 20 s de H.264 25 fps con GOP de 2 s más AAC:
+
+| | `-c copy -f mpegts` | añadiendo `-muxrate 6000000` | Referencia |
+|---|---|---|---|
+| Repetición de PCR | 80,0 ms — **100 % fuera** | 20,0 ms — 0 % fuera | ≤ 40 ms |
+| Extensión de 27 MHz del PCR | **0 en las 250 muestras** | presente en 960 de 1004 | imprescindible |
+| Tasa entre PCR | 4,06 – 8,33 Mbps → **oscila 2,1×** | 6,00 – 6,00 Mbps → 1,0× | constante |
+| Paquetes nulos | 0 | 8716 (10,9 %) | los que hagan falta |
+
+La segunda fila es la que decide: **sin `-muxrate`, ffmpeg tampoco calcula la
+extensión de 27 MHz del PCR**. Sin ella el reloj queda cuantizado a 90 kHz —
+11,1 µs—, veintidós veces por encima de la tolerancia de PCR_accuracy que pide
+TR 101 290. Con `-muxrate` la calcula. No basta para ser conforme, pero sin
+ella es imposible.
+
+Así que la orden para emisión es:
+
+```sh
+ffmpeg -v quiet -re -i peli.mp4 -c copy -f mpegts \
+       -muxrate 6000000 -mpegts_flags +system_b -
+```
+
+Y poco más hace falta: `-pat_period` (0,1 s) y `-sdt_period` (0,5 s) ya vienen
+bien de fábrica, y `-pcr_period 20` es redundante —con `-muxrate` la salida es
+byte a byte idéntica con él y sin él—. `+system_b` es señalización DVB en vez
+de la ATSC por defecto.
+
+**El único parámetro delicado es el propio `-muxrate`, y quedarse corto es peor
+que no ponerlo.** Pidiéndole 4M a ese mismo flujo de 5,36, ffmpeg avisa
+`dts < pcr, TS is invalid` y estira la línea de tiempo: 20 s de material
+salieron repartidos en 26,9 s. Y lo traicionero es que las métricas de
+conformidad salen impecables —PCR cada 19,9 ms, tasa clavada en 4,00 Mbps— con
+el flujo roto. Ponlo con holgura sobre la suma de los flujos elementales; lo
+que sobre se rellena con nulos.
+
+Con la salida ya en CBR, `"bitrate": "pcr"` hace lo que promete: el ritmo lo
+marca el reloj del multiplexor y no una estimación tuya.
 
 ### Que el ritmo lo marque el flujo: `"bitrate": "pcr"`
 

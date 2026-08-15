@@ -25,7 +25,7 @@
     {
       "name": "peli-mp4",
       "dest": "239.0.10.3:5000",
-      "exec": "ffmpeg -v quiet -re -i /srv/media/peli.mp4 -c copy -f mpegts -",
+      "exec": "ffmpeg -v quiet -re -i /srv/media/peli.mp4 -c copy -f mpegts -muxrate 8000000 -mpegts_flags +system_b -",
       "bitrate": "pcr",
       "rtp": true
     },
