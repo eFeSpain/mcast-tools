@@ -101,6 +101,12 @@ func (e SendCfg) describe() string {
 // clásico precisamente porque cabe entero en una MTU de 1500.
 const tsPacket = 188
 
+// mtuSegura es lo que cabe en un datagrama IPv4/UDP dentro de una MTU de 1500
+// sin fragmentar: 1500 menos 20 de cabecera IP y 8 de UDP. Por eso el tamaño
+// clásico son 1316 bytes (7 paquetes TS), que con los 12 de RTP se quedan en
+// 1328 y siguen cabiendo holgados.
+const mtuSegura = 1500 - 20 - 8
+
 // looksLikeTS reconoce un transport stream por sus bytes de sincronismo: un TS
 // bien formado lleva 0x47 al principio de cada paquete de 188 bytes.
 //
@@ -360,6 +366,21 @@ func resolveSendChannels(c SendConfig, statsFlag float64) sendResolved {
 		if usaRTP && size+rtpHeaderLen > 65507 {
 			reject(txt.warnBadSize, name, size+rtpHeaderLen)
 			continue
+		}
+		// Y el aviso de MTU, que el comentario de arriba prometía desde el
+		// principio y no existía. Pasarse de la MTU no es ilegal —el kernel
+		// fragmenta y el flujo sale—, pero la fragmentación IP en multicast
+		// hace perder paquetes de una forma difícil de diagnosticar: basta con
+		// que se pierda un fragmento para que se pierda el datagrama entero, y
+		// hay routers que directamente no reensamblan multicast fragmentado.
+		// Por eso es aviso y no rechazo: hay redes con jumbo frames donde es
+		// perfectamente legítimo.
+		datagrama := size
+		if usaRTP {
+			datagrama += rtpHeaderLen
+		}
+		if datagrama > mtuSegura {
+			r.warns = append(r.warns, fmt.Sprintf(txt.warnOverMTU, name, datagrama, mtuSegura))
 		}
 		// Fichero, stdin y exec son excluyentes: con dos a la vez no hay forma
 		// de saber cuál gana, y elegir por el programa sería adivinar.

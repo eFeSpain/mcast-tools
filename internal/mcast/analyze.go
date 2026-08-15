@@ -82,6 +82,7 @@ type tsAnalyzer struct {
 	teiErrs           uint64
 	scrambled         uint64
 	notTS, misaligned uint64
+	syncLoss          uint64
 	ccErrs            uint64
 	// worstPID es el PID con más errores de continuidad del intervalo: nombrar
 	// uno concreto es lo que convierte el aviso en accionable.
@@ -126,6 +127,11 @@ type tsAnalyzer struct {
 	// patVisto sobrevive al reinicio de contadores: dice que este flujo lleva
 	// PAT, aunque en este intervalo no haya pasado ninguna.
 	patVisto bool
+	// principal y pcrDeclarado son el programa de número más bajo y el PCR_PID
+	// que declara SU PMT. Mientras no llegue ninguna PMT valen 0 y manda el
+	// primer PID que traiga una referencia.
+	principal    uint16
+	pcrDeclarado uint16
 }
 
 type program struct {
@@ -190,7 +196,12 @@ func (a *tsAnalyzer) feed(datagram []byte) {
 
 func (a *tsAnalyzer) packet(p []byte) {
 	if p[0] != 0x47 {
-		a.notTS++
+		// Pérdida de sincronismo DENTRO de un datagrama que sí empezaba por
+		// 0x47. Se cuenta aparte de los datagramas que no son TS en absoluto:
+		// mezclar paquetes y datagramas en el mismo número daba un total que
+		// podía superar a los datagramas recibidos, bajo un mensaje que decía
+		// "datagramas".
+		a.syncLoss++
 		return
 	}
 	a.packets++
@@ -265,7 +276,15 @@ func (a *tsAnalyzer) continuity(pid uint16, st *pidState, cc uint8, tienePayload
 	case cc == esperado:
 		st.dupSeen = false
 	case cc == st.lastCC && tienePayload && !st.dupSeen:
-		// Un duplicado exacto está permitido, pero solo uno seguido.
+		// Un duplicado está permitido, pero solo uno seguido.
+		//
+		// La norma exige además que los dos paquetes sean idénticos byte a
+		// byte salvo el PCR, y eso NO se comprueba: guardar el paquete anterior
+		// de cada PID son 188 bytes por PID, y un flujo hostil puede crear los
+		// 8192. El precio de no comprobarlo es dejar pasar un caso raro —mismo
+		// contador con contenido distinto—, es decir avisar de menos. Que es la
+		// dirección segura para una herramienta cuyo riesgo principal es el
+		// falso positivo.
 		st.dupSeen = true
 		return
 	case discontinuo:
@@ -291,8 +310,17 @@ func (a *tsAnalyzer) clock(pid uint16, p []byte, discontinuo bool) {
 	if !ok {
 		return
 	}
-	if a.havePCR && pid != a.pcrPID {
-		return // otro programa: el reloj que se sigue es el del primero visto
+	// Qué reloj se sigue. Si alguna PMT ya ha dicho cuál es el PCR_PID de su
+	// programa, manda eso; si no, el primer PID que traiga una referencia.
+	// Anclarse sin más al primero que pase es una lotería en un multiplex: se
+	// acababa siguiendo el reloj de un programa secundario mientras se
+	// informaba del principal.
+	if a.pcrDeclarado != 0 {
+		if pid != a.pcrDeclarado {
+			return
+		}
+	} else if a.havePCR && pid != a.pcrPID {
+		return
 	}
 	// El recuento y la comprobación de la extensión van ANTES de separar el
 	// primer PCR del resto. Contando solo a partir del segundo, "todas las
@@ -438,6 +466,7 @@ func (a *tsAnalyzer) maybePMT(pid uint16, p []byte) {
 		return
 	}
 	pr.pcrPID = uint16(s[8]&0x1F)<<8 | uint16(s[9])
+	a.elegirReloj(pr)
 	infoLen := int(s[10]&0x0F)<<8 | int(s[11])
 	off := 12 + infoLen
 	fin := len(s) - 4 // sin el CRC
@@ -451,6 +480,24 @@ func (a *tsAnalyzer) maybePMT(pid uint16, p []byte) {
 		}
 		off += 5 + esLen
 	}
+}
+
+// elegirReloj fija qué PCR se sigue: el del programa de número más bajo, que es
+// la convención razonable para "el principal" cuando el multiplex trae varios.
+func (a *tsAnalyzer) elegirReloj(pr *program) {
+	if pr.pcrPID == 0 || pr.pcrPID == nullPID {
+		return // 0x1FFF en el PCR_PID significa "este programa no lleva reloj"
+	}
+	if a.pcrDeclarado != 0 && pr.number > a.principal {
+		return
+	}
+	if a.pcrDeclarado == pr.pcrPID {
+		return
+	}
+	a.principal, a.pcrDeclarado = pr.number, pr.pcrPID
+	// Cambiar de reloj a media emisión obliga a re-anclar: medir el desfase
+	// entre dos relojes distintos daría un salto que no ha ocurrido.
+	a.havePCR, a.havePatPCR = false, false
 }
 
 // codecName traduce el stream_type de la PMT. Solo los que se ven en
@@ -540,6 +587,9 @@ func (a *tsAnalyzer) snapshot() string {
 	if a.misaligned > 0 {
 		av = append(av, fmt.Sprintf(txt.logTSMisaligned, a.misaligned))
 	}
+	if a.syncLoss > 0 {
+		av = append(av, fmt.Sprintf(txt.logTSSyncLoss, a.syncLoss))
+	}
 	if a.ccErrs > 0 {
 		av = append(av, fmt.Sprintf(txt.logTSContinuity, a.ccErrs, a.worstPID))
 	}
@@ -604,7 +654,7 @@ func (a *tsAnalyzer) snapshot() string {
 	// error.
 	a.packets, a.nulls = 0, 0
 	a.teiErrs, a.scrambled = 0, 0
-	a.notTS, a.misaligned = 0, 0
+	a.notTS, a.misaligned, a.syncLoss = 0, 0, 0
 	a.ccErrs, a.worstErrs, a.worstPID = 0, 0, 0
 	a.pcrCount, a.pcrMaxGapMs, a.pcrOver, a.pcrJumps, a.pcrExtZero = 0, 0, 0, 0, 0
 	a.patCount, a.patMaxGapMs, a.patOver = 0, 0, 0

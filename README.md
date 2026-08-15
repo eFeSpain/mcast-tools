@@ -525,6 +525,13 @@ Por eso el payload por defecto son 1316 bytes: 1316 + 12 = 1328, que cabe
 holgado en una MTU de 1500. La secuencia y el SSRC arrancan aleatorios, como
 manda la norma.
 
+Si el datagrama se pasa de los 1472 bytes que caben en esa MTU —contando los 12
+de RTP— se avisa, pero no se rechaza: en una red con jumbo frames es legítimo.
+Lo que no es legítimo es no enterarse, porque IP fragmenta y **basta con perder
+un fragmento para perder el datagrama entero**; hay además routers que no
+reensamblan multicast fragmentado. Es la clase de pérdida que luego cuesta
+semanas de diagnosticar.
+
 ### Sigue sin ser un multiplexor
 
 `mcast-send` trocea, pacea y encapsula. Del transport stream solo lee el campo

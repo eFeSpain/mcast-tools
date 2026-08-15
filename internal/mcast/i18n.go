@@ -84,6 +84,7 @@ type msgs struct {
 	warnNotTSFile    string
 	warnExecMissing  string
 	warnPCRNeedsTS   string
+	warnOverMTU      string
 	warnNoPCR        string
 
 	// Errores de red
@@ -124,6 +125,7 @@ type msgs struct {
 	logTSContents   string
 	logTSNotTS      string
 	logTSMisaligned string
+	logTSSyncLoss   string
 	logTSContinuity string
 	logTSTEI        string
 	logTSPCRJump    string
@@ -216,6 +218,7 @@ var msgsEN = msgs{
 	warnNotTSFile:    "channel '%s': %s is %s, and UDP multicast carries MPEG-TS. Remux it without re-encoding:  ffmpeg -i %s -c copy -f mpegts %s",
 	warnExecMissing:  "channel '%s' cannot run %s (%v), ignored",
 	warnPCRNeedsTS:   "channel '%s' asks for PCR pacing, but a datagram size of %d is not a multiple of %d: the TS packets would be split and no PCR could be read; ignored",
+	warnOverMTU:      "channel '%s' emits %d-byte datagrams, above the %d that fit in a 1500 MTU: IP will fragment them, and a single lost fragment loses the whole datagram",
 	warnNoPCR:        "[%s] no PCR found in the stream: it is not MPEG-TS, or it carries none. Falling back to the configured %.2f Mbps",
 
 	errNoIface:          "no interface named or addressed %s",
@@ -247,6 +250,7 @@ var msgsEN = msgs{
 	logTSHealth:      "[%s] TS: %s",
 	logTSNotTS:       "%d datagrams are not MPEG-TS",
 	logTSMisaligned:  "%d datagrams are not a whole number of 188-byte packets",
+	logTSSyncLoss:    "%d packets lost the 0x47 sync byte",
 	logTSContinuity:  "%d continuity errors (worst PID %d)",
 	logTSTEI:         "%d packets flagged as corrupt upstream (TEI)",
 	logTSPCRJump:     "%d PCR jumps with no discontinuity_indicator",
@@ -343,6 +347,7 @@ var msgsES = msgs{
 	warnNotTSFile:    "canal '%s': %s es %s, y por UDP multicast viaja MPEG-TS. Remultiplexa sin recodificar:  ffmpeg -i %s -c copy -f mpegts %s",
 	warnExecMissing:  "canal '%s' no puede ejecutar %s (%v), ignorado",
 	warnPCRNeedsTS:   "canal '%s' pide pacing por PCR, pero un datagrama de %d no es múltiplo de %d: los paquetes TS saldrían partidos y no se podría leer ningún PCR; ignorado",
+	warnOverMTU:      "canal '%s' emite datagramas de %d bytes, por encima de los %d que caben en una MTU de 1500: IP los fragmentará, y basta con perder un fragmento para perder el datagrama entero",
 	warnNoPCR:        "[%s] no se ha encontrado ningún PCR en el flujo: o no es MPEG-TS, o no los lleva. Se vuelve a los %.2f Mbps configurados",
 
 	errNoIface:          "no hay ninguna interfaz llamada ni direccionada %s",
@@ -374,6 +379,7 @@ var msgsES = msgs{
 	logTSHealth:      "[%s] TS: %s",
 	logTSNotTS:       "%d datagramas no son MPEG-TS",
 	logTSMisaligned:  "%d datagramas no traen paquetes enteros de 188 bytes",
+	logTSSyncLoss:    "%d paquetes han perdido el byte de sincronismo 0x47",
 	logTSContinuity:  "%d errores de continuidad (peor PID %d)",
 	logTSTEI:         "%d paquetes marcados como corruptos aguas arriba (TEI)",
 	logTSPCRJump:     "%d saltos de PCR sin discontinuity_indicator",

@@ -522,6 +522,13 @@ numbers** to detect loss and reordering, which is impossible with raw UDP.
 That is why the default payload is 1316 bytes: 1316 + 12 = 1328, comfortably
 inside a 1500 MTU. Sequence and SSRC start random, as the standard requires.
 
+If the datagram goes past the 1472 bytes that fit in that MTU — RTP's 12
+included — it warns but does not reject: on a jumbo-frame network it is
+legitimate. What is not legitimate is not knowing, because IP fragments and
+**losing one fragment loses the whole datagram**; and some routers do not
+reassemble fragmented multicast at all. It is the kind of loss that costs weeks
+to diagnose later.
+
 ### It is still not a muxer
 
 `mcast-send` chunks, paces and encapsulates. Of the transport stream it reads

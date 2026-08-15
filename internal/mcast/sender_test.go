@@ -701,3 +701,51 @@ func TestFileLoopRepeatsAndStops(t *testing.T) {
 		t.Fatal("sin bucle, el fichero tiene que agotarse")
 	}
 }
+
+// El comentario de sender_config.go prometía este aviso desde el principio y no
+// existía: solo se comprobaba el límite duro del datagrama IPv4 (65507). Un
+// canal con size 1500 y rtp arrancaba tan contento emitiendo datagramas que se
+// fragmentan en cada salto, y la fragmentación IP en multicast hace perder
+// paquetes de una forma difícil de diagnosticar.
+func TestWarnsOverMTUWithoutRejecting(t *testing.T) {
+	rtpOn := true
+	casos := []struct {
+		nombre string
+		size   int
+		rtp    bool
+		avisa  bool
+	}{
+		{"el tamaño clásico cabe", 1316, false, false},
+		{"y con RTP también (1328)", 1316, true, false},
+		{"justo en el límite", mtuSegura, false, false},
+		{"el límite más los 12 de RTP ya no cabe", mtuSegura, true, true},
+		{"claramente por encima", 1500, false, true},
+	}
+
+	for _, c := range casos {
+		ch := SendChannelCfg{Name: "x", Dest: "239.0.12.1:5000", Size: c.size}
+		if c.rtp {
+			ch.RTP = &rtpOn
+		}
+		r := resolveSendChannels(SendConfig{
+			Defaults: SendDefaults{Iface: "10.30.0.5", Size: 1316, Bitrate: "10M"},
+			Channels: []SendChannelCfg{ch},
+		}, 10)
+
+		hayAviso := false
+		for _, w := range r.warns {
+			if strings.Contains(w, "MTU") {
+				hayAviso = true
+			}
+		}
+		if hayAviso != c.avisa {
+			t.Errorf("%s (size=%d rtp=%v): aviso de MTU = %v, quiero %v · %v",
+				c.nombre, c.size, c.rtp, hayAviso, c.avisa, r.warns)
+		}
+		// Y en ningún caso se rechaza el canal: pasarse de la MTU no es
+		// ilegal, y en una red con jumbo frames es legítimo.
+		if len(r.channels) != 1 {
+			t.Errorf("%s: el aviso ha rechazado el canal: %v", c.nombre, r.warns)
+		}
+	}
+}

@@ -629,3 +629,76 @@ func TestContentsReportsTheProgrammesItKnows(t *testing.T) {
 		t.Errorf("el programa con PMT conocida no se informa: %q", got)
 	}
 }
+
+// En un multiplex, anclarse al primer PID que traiga un PCR es una lotería: se
+// acababa siguiendo el reloj de un programa secundario mientras se informaba
+// del principal. Manda el PCR_PID que declara la PMT del programa más bajo.
+func TestClockFollowsThePMTDeclaredPCRPID(t *testing.T) {
+	a := newTSAnalyzer()
+	pcr := func(ms float64) uint64 { return uint64(ms*pcrPerMs) + 1 }
+
+	// Primero pasa el reloj de un programa secundario: se ancla a él por no
+	// tener nada mejor.
+	a.feed(mkTS(paq{pid: 501, cc: 0, payload: true, tienePCR: true, pcr: pcr(0)}))
+	if a.pcrPID != 501 {
+		t.Fatalf("sin PMT debería seguir al primero que pase: %d", a.pcrPID)
+	}
+
+	// Y ahora llegan las tablas: el programa 1 declara su reloj en el 101.
+	a.feed(mkTS(paq{pid: patPID, cc: 0, payload: true, pusi: true,
+		datos: conPointer(patSection(1, 4096))}))
+	a.feed(mkTS(paq{pid: 4096, cc: 0, payload: true, pusi: true,
+		datos: conPointer(pmtSection(101, map[uint16]uint8{101: 0x1B, 102: 0x0F}))}))
+
+	if a.pcrDeclarado != 101 {
+		t.Fatalf("no se ha adoptado el PCR_PID que declara la PMT: %d", a.pcrDeclarado)
+	}
+	// Y el reloj del programa ajeno deja de contar, sin inventar un salto.
+	a.feed(mkTS(paq{pid: 501, cc: 1, payload: true, tienePCR: true, pcr: pcr(99999)}))
+	a.feed(mkTS(paq{pid: 101, cc: 0, payload: true, tienePCR: true, pcr: pcr(0)}))
+	a.feed(mkTS(paq{pid: 101, cc: 1, payload: true, tienePCR: true, pcr: pcr(20)}))
+	if got := a.snapshot(); got != "" {
+		t.Errorf("el cambio de reloj ha inventado un fallo: %q", got)
+	}
+}
+
+// Un datagrama que no es TS y un paquete que pierde el sincronismo dentro de un
+// datagrama que sí lo era son cosas distintas. Con un solo contador, el número
+// podía superar a los datagramas recibidos bajo un mensaje que decía
+// "datagramas".
+func TestSyncLossIsCountedApartFromNonTSDatagrams(t *testing.T) {
+	a := newTSAnalyzer()
+	a.feed([]byte("ni de lejos un transport stream, pero lo bastante largo para no ser corto"))
+	if a.notTS != 1 || a.syncLoss != 0 {
+		t.Errorf("datagrama ajeno: notTS=%d syncLoss=%d, quiero 1 y 0", a.notTS, a.syncLoss)
+	}
+
+	// Un datagrama que empieza bien pero cuyo segundo paquete está corrido.
+	b := newTSAnalyzer()
+	d := append(mkTS(paq{pid: 101, cc: 0, payload: true}), make([]byte, tsPacket)...)
+	b.feed(d)
+	if b.notTS != 0 || b.syncLoss != 1 {
+		t.Errorf("sincronismo perdido: notTS=%d syncLoss=%d, quiero 0 y 1", b.notTS, b.syncLoss)
+	}
+	if got := b.snapshot(); !strings.Contains(got, "0x47") {
+		t.Errorf("no se avisa de la pérdida de sincronismo: %q", got)
+	}
+}
+
+// El stream_type se traduce mal con facilidad, y 0x01 no es MPEG-2.
+func TestCodecNames(t *testing.T) {
+	casos := map[uint8]string{
+		0x01: "MPEG-1", 0x02: "MPEG-2", 0x03: "MP1/MP2",
+		0x0F: "AAC", 0x11: "AAC-LATM", 0x1B: "H.264", 0x24: "H.265",
+		0x81: "AC-3", 0x87: "E-AC-3",
+	}
+	for tipo, quiero := range casos {
+		if got := codecName(tipo); got != quiero {
+			t.Errorf("stream_type %#02x = %q, quiero %q", tipo, got, quiero)
+		}
+	}
+	// Uno desconocido tiene que dar el número, no una etiqueta inventada.
+	if got := codecName(0x42); !strings.Contains(got, "42") {
+		t.Errorf("un stream_type desconocido debería mostrar su número: %q", got)
+	}
+}
