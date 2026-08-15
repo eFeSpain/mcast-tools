@@ -29,6 +29,11 @@ type stats struct {
 	// lastDrop, igual, para los descartes: sin esto no sabrías si te está
 	// entrando tráfico de un emisor ajeno o dirigido a otro grupo.
 	lastDrop atomic.Value // string
+	// ts analiza el transport stream que pasa. Lo crea el gestor antes de
+	// lanzar la goroutine del canal, así que el puntero no se escribe nunca
+	// desde dos sitios; la concurrencia entre alimentarlo y consultarlo la
+	// resuelve él por dentro. Es nil en el emisor, que no recibe nada.
+	ts *tsAnalyzer
 }
 
 // resolveIface acepta una IP local ("10.30.0.5") o el nombre de la interfaz
@@ -242,6 +247,10 @@ func runRelay(ctx context.Context, e EffCfg, st *stats, info, errl *log.Logger) 
 		}
 	}()
 
+	// Se resuelve una vez, fuera del bucle: el puntero lo pone el gestor antes
+	// de arrancar la goroutine, así que aquí ya no cambia.
+	analiza := e.Analyze && st.ts != nil
+
 	buf := make([]byte, 65536)
 	for {
 		if e.Watchdog > 0 {
@@ -289,5 +298,10 @@ func runRelay(ctx context.Context, e EffCfg, st *stats, info, errl *log.Logger) 
 		}
 		atomic.AddUint64(&st.pkts, 1)
 		atomic.AddUint64(&st.byts, uint64(n))
+		// El análisis va DESPUÉS de reenviar, deliberadamente: el trabajo de
+		// este proceso es que el flujo salga, y mirarlo no puede retrasarlo.
+		if analiza {
+			st.ts.feed(data)
+		}
 	}
 }

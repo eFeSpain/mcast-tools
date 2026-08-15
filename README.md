@@ -134,6 +134,7 @@ necesite.
 | `source` | canal | obligatorio | `GRUPO:PUERTO` de origen, tiene que ser multicast |
 | `dest` | canal | obligatorio | lista de `GRUPO:PUERTO` destino (también vale unicast) |
 | `from` | canal | — | emisores de los que se acepta el grupo; vacío acepta cualquiera. Ver [Filtrar por emisor (SSM)](#filtrar-por-emisor-ssm) |
+| `analyze` | ambos | true | inspeccionar el transport stream que pasa. Ver [Qué lleva el flujo, y si está sano](#qué-lleva-el-flujo-y-si-está-sano) |
 
 ### Filtrar por emisor (SSM)
 
@@ -237,6 +238,66 @@ raros y como tasa se redondearían a cero — un error cada diez segundos son
 
 Cuando hay algún `err`, la siguiente línea del log trae el motivo real del
 último fallo (`network is unreachable` y compañía), no solo el contador.
+
+### Qué lleva el flujo, y si está sano
+
+Las estadísticas dicen **cuánto** pasa. No dicen **qué** pasa, y son preguntas
+distintas: `err` son fallos de envío y `drop` son datagramas de otro grupo, así
+que **un transport stream puede venir roto con los dos contadores a cero**.
+Errores de continuidad, PCR que pega saltos, PAT que desaparece — nada de eso
+mueve una sola cifra de la línea de siempre.
+
+Eso deja sin respuesta la pregunta que de verdad se hace a las tres de la
+mañana: el cliente dice que el canal se ve a saltos, miras el log y pone
+`0 err · 0 drop`. ¿Y ahora qué?
+
+`mcast-dup` mira el TS que reenvía. Al arrancar el canal, cuando pasa la PMT,
+dice una vez lo que lleva dentro:
+
+```
+[13:54:32] la1-hd  lleva programa 1: PCR en el PID 101 · 101 H.264 · 102 AAC · 103 AC-3
+```
+
+Y en cada resumen añade una línea **solo si hay algo que contar**:
+
+```
+[13:54:42] la1-hd     950 pkt/s · rx 9.98 Mbps · tx 29.94 Mbps · 0 err · 0 drop
+[13:54:42] la1-hd  TS: 47 errores de continuidad (peor PID 101) · 3 saltos de PCR sin discontinuity_indicator
+```
+
+Con eso, la respuesta deja de ser un encogimiento de hombros: **el problema
+viene de arriba y tienes el PID**. Es la diferencia entre «mi relé va bien» y
+«la señal va bien», que es justo lo que hay que demostrar cuando estás en medio
+de la cadena y por proximidad pareces el culpable.
+
+Un canal sano **no imprime nada**, a propósito: un log que dice «todo bien»
+cada diez segundos es un log que nadie lee, y entonces tampoco se lee el que
+dice algo.
+
+Lo que se comprueba, que es el subconjunto de las Prioridades 1 y 2 de
+ETSI TR 101 290 que se puede mirar sin decodificar:
+
+| | |
+|---|---|
+| **Continuidad** | errores por PID, nombrando el peor. Respeta lo que permite la norma: el contador solo avanza en los paquetes con payload, un duplicado exacto es legítimo, y una discontinuidad declarada no es un fallo |
+| **PCR** | intervalo por encima de 40 ms, saltos sin `discontinuity_indicator`, y si falta la extensión de 27 MHz |
+| **PAT** | intervalo por encima de 500 ms, medido en el reloj del propio flujo |
+| **Integridad** | paquetes con `transport_error_indicator`, datagramas que no son TS, y datagramas que no traen paquetes enteros de 188 bytes |
+| **Cifrado** | paquetes con el `scrambling_control` puesto |
+
+Entiende tanto TS a pelo como TS dentro de RTP.
+
+Va **activo por defecto**, y el coste está medido: **161 ns por datagrama** de
+1316 bytes, que a 10 Mbps son 950 datagramas por segundo y canal — el 0,015 %
+de un núcleo. Se analiza *después* de reenviar, nunca antes. Aun así se puede
+apagar con `"analyze": false`, en `defaults` o por canal: en un relé, cualquier
+cosa que no sea reenviar es opcional por principio.
+
+Lo que **no** hace: no reensambla secciones PSI repartidas entre paquetes (para
+PAT y PMT normales no hace falta), no verifica el CRC de las tablas, y no lee
+la SDT, así que no da nombres de servicio. Y no sustituye a un analizador
+certificado: si necesitas certificar formalmente, eso es TSDuck o un equipo de
+sobremesa.
 
 ### Vigilancia de recepción (`watchdog`)
 

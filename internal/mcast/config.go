@@ -32,6 +32,7 @@ type Defaults struct {
 	Sndbuf   int      `json:"sndbuf"`
 	Stats    *float64 `json:"stats"`
 	Watchdog *float64 `json:"watchdog"`
+	Analyze  *bool    `json:"analyze"`
 }
 
 type ChannelCfg struct {
@@ -47,6 +48,7 @@ type ChannelCfg struct {
 	Rcvbuf   *int     `json:"rcvbuf"`
 	Sndbuf   *int     `json:"sndbuf"`
 	Watchdog *float64 `json:"watchdog"`
+	Analyze  *bool    `json:"analyze"`
 }
 
 type Config struct {
@@ -66,6 +68,15 @@ type EffCfg struct {
 	Rcvbuf   int
 	Sndbuf   int
 	Watchdog time.Duration
+	// Analyze inspecciona el transport stream que pasa, para poder distinguir
+	// "el relé va bien" de "la señal va bien".
+	//
+	// Va activo por defecto porque su valor está justo en enterarse sin ir a
+	// mirar, y porque el coste está medido: 161 ns por datagrama de 1316 bytes
+	// (BenchmarkAnalyzerFeed), que a 10 Mbps son 950 datagramas por segundo y
+	// canal, o sea el 0,015 % de un núcleo. Se puede apagar de todas formas: en
+	// un relé, cualquier cosa que no sea reenviar es opcional por principio.
+	Analyze bool
 }
 
 func (e EffCfg) key() string { b, _ := json.Marshal(e); return string(b) }
@@ -409,9 +420,19 @@ func resolveChannelsWith(c Config, statsFlag float64, local []net.IP) resolved {
 			continue
 		}
 		graph.add(sa.String(), dkeys)
+		// El análisis va activo salvo que se apague: su valor está en
+		// enterarse sin ir a mirar, y con opt-in nadie lo activaría hasta
+		// después del primer disgusto.
+		analiza := true
+		if d.Analyze != nil {
+			analiza = *d.Analyze
+		}
+		if ch.Analyze != nil {
+			analiza = *ch.Analyze
+		}
 		e := EffCfg{Name: name, Source: ch.Source, Dest: dkeys, From: from, Iface: d.Iface,
 			TTL: ttl, Loop: dLoop, Rcvbuf: d.Rcvbuf, Sndbuf: d.Sndbuf,
-			Watchdog: seconds(dWatch)}
+			Watchdog: seconds(dWatch), Analyze: analiza}
 		if ch.Iface != "" {
 			e.Iface = ch.Iface
 		}

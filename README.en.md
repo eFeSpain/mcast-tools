@@ -132,6 +132,7 @@ needs.
 | `source` | channel | required | source `GROUP:PORT`, must be multicast |
 | `dest` | channel | required | list of destination `GROUP:PORT` (unicast works too) |
 | `from` | channel | — | senders the group is accepted from; empty accepts any. See [Filtering by sender (SSM)](#filtering-by-sender-ssm) |
+| `analyze` | both | true | inspect the transport stream going through. See [What the stream carries, and whether it is healthy](#what-the-stream-carries-and-whether-it-is-healthy) |
 
 ### Filtering by sender (SSM)
 
@@ -237,6 +238,66 @@ channel's group.
 
 Whenever there is an `err`, the next log line carries the actual reason for the
 last failure (`network is unreachable` and friends), not just the counter.
+
+### What the stream carries, and whether it is healthy
+
+The statistics tell you **how much** goes through. They do not tell you **what**
+goes through, and those are different questions: `err` is send failures and
+`drop` is datagrams for another group, so **a transport stream can be broken
+with both counters at zero**. Continuity errors, a PCR that jumps, a PAT that
+disappears — none of it moves a single figure on the usual line.
+
+That leaves the three-in-the-morning question unanswered: the customer says the
+channel is stuttering, you look at the log and it says `0 err · 0 drop`. Now
+what?
+
+`mcast-dup` looks at the TS it relays. When the channel starts, once the PMT
+goes by, it says what is inside — once:
+
+```
+[13:54:32] la1-hd  carries programme 1: PCR on PID 101 · 101 H.264 · 102 AAC · 103 AC-3
+```
+
+And on each summary it adds a line **only when there is something to say**:
+
+```
+[13:54:42] la1-hd     950 pkt/s · rx 9.98 Mbps · tx 29.94 Mbps · 0 err · 0 drop
+[13:54:42] la1-hd  TS: 47 continuity errors (worst PID 101) · 3 PCR jumps with no discontinuity_indicator
+```
+
+With that, the answer stops being a shrug: **the problem comes from upstream and
+you have the PID**. It is the difference between "my relay is fine" and "the
+signal is fine", which is exactly what you have to prove when you sit in the
+middle of the chain and look guilty by proximity.
+
+A healthy channel **prints nothing**, deliberately: a log that says "all good"
+every ten seconds is a log nobody reads, and then nobody reads the one that
+says something either.
+
+What is checked — the subset of ETSI TR 101 290 Priorities 1 and 2 you can look
+at without decoding anything:
+
+| | |
+|---|---|
+| **Continuity** | errors per PID, naming the worst. It honours what the standard allows: the counter only advances on packets with payload, one exact duplicate is legitimate, and a declared discontinuity is not a fault |
+| **PCR** | intervals above 40 ms, jumps with no `discontinuity_indicator`, and a missing 27 MHz extension |
+| **PAT** | intervals above 500 ms, measured on the stream's own clock |
+| **Integrity** | packets with `transport_error_indicator`, datagrams that are not TS, and datagrams that do not carry whole 188-byte packets |
+| **Scrambling** | packets with `scrambling_control` set |
+
+It understands both raw TS and TS inside RTP.
+
+It is **on by default**, and the cost is measured: **161 ns per 1316-byte
+datagram**, which at 10 Mbps is 950 datagrams per second per channel — 0.015 %
+of one core. Analysis happens *after* forwarding, never before. It can still be
+turned off with `"analyze": false`, in `defaults` or per channel: in a relay,
+anything that is not forwarding is optional on principle.
+
+What it does **not** do: it does not reassemble PSI sections split across
+packets (not needed for ordinary PAT and PMT), it does not verify table CRCs,
+and it does not read the SDT, so no service names. And it is no substitute for a
+certified analyser: if you need formal certification, that is TSDuck or a
+bench instrument.
 
 ### Receive watchdog
 

@@ -197,6 +197,9 @@ func (m *Manager[T]) apply(desired []T) {
 		}
 		ctx, cancel := context.WithCancel(m.root)
 		st := &stats{name: name}
+		if !m.sender {
+			st.ts = newTSAnalyzer()
+		}
 		w := &worker[T]{cfg: e, key: e.key(), cancel: cancel, st: st, done: make(chan struct{})}
 		m.wk[name] = w
 		m.info.Printf(txt.logStarting, name, e.describe())
@@ -357,6 +360,18 @@ func (m *Manager[T]) report(elapsed float64) {
 		if dr > 0 {
 			if last, ok := st.lastDrop.Swap("").(string); ok && last != "" {
 				m.errl.Printf(txt.logLastDrop, n, last)
+			}
+		}
+		if st.ts != nil {
+			// Qué lleva el flujo: una sola vez, cuando la PMT ya lo ha dicho.
+			if c := st.ts.contents(); c != "" {
+				m.info.Printf(txt.logTSContents, n, c)
+			}
+			// Y lo anómalo del intervalo. Cadena vacía = nada que contar, y
+			// entonces no se imprime: un log que dice "todo bien" cada diez
+			// segundos es un log que nadie lee.
+			if h := st.ts.snapshot(); h != "" {
+				m.errl.Printf(txt.logTSHealth, n, h)
 			}
 		}
 	}

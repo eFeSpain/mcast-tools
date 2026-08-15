@@ -118,6 +118,21 @@ type msgs struct {
 	logSendLooping   string
 	logFlagsModeSend string
 
+	// Análisis del transport stream
+	logTSProgram    string
+	logTSHealth     string
+	logTSContents   string
+	logTSNotTS      string
+	logTSMisaligned string
+	logTSContinuity string
+	logTSTEI        string
+	logTSPCRJump    string
+	logTSPCRGap     string
+	logTSPATGap     string
+	logTSNoPCR      string
+	logTSPCRNoExt   string
+	logTSScrambled  string
+
 	// Ciclo de vida de los canales
 	logRelayDown   string
 	logLastSendErr string
@@ -220,11 +235,25 @@ var msgsEN = msgs{
 	errExecEmpty:        "the exec command is empty",
 	errExecFailed:       "the source command failed (%v); its last output: %s",
 
-	warnNoDstFilter:  "[%s] this platform cannot filter by destination address: foreign unicast or broadcast traffic reaching port %d will be relayed too",
-	warnSockbuf:      "[%s] could not set %s to %d bytes: %v",
-	warnNoSSM:        "[%s] source-specific join unavailable (%v): joining the whole group and filtering senders here instead, which works but does not stop the traffic upstream",
-	logSSMJoined:     "[%s] source-specific join (SSM) for %s from %s",
-	logLastDrop:      "[%s] last discarded datagram: %s",
+	warnNoDstFilter: "[%s] this platform cannot filter by destination address: foreign unicast or broadcast traffic reaching port %d will be relayed too",
+	warnSockbuf:     "[%s] could not set %s to %d bytes: %v",
+	warnNoSSM:       "[%s] source-specific join unavailable (%v): joining the whole group and filtering senders here instead, which works but does not stop the traffic upstream",
+	logSSMJoined:    "[%s] source-specific join (SSM) for %s from %s",
+	logLastDrop:     "[%s] last discarded datagram: %s",
+
+	logTSProgram:     "programme %d: PCR on PID %d · %s",
+	logTSContents:    "[%s] carries %s",
+	logTSHealth:      "[%s] TS: %s",
+	logTSNotTS:       "%d datagrams are not MPEG-TS",
+	logTSMisaligned:  "%d datagrams are not a whole number of 188-byte packets",
+	logTSContinuity:  "%d continuity errors (worst PID %d)",
+	logTSTEI:         "%d packets flagged as corrupt upstream (TEI)",
+	logTSPCRJump:     "%d PCR jumps with no discontinuity_indicator",
+	logTSPCRGap:      "%d PCR intervals above the limit, peak %.0f ms (max %d)",
+	logTSPATGap:      "%d PAT intervals above the limit, peak %.0f ms (max %d)",
+	logTSNoPCR:       "no PCR: nothing to pace or lock to",
+	logTSPCRNoExt:    "PCR with no 27 MHz extension: clock quantised to 90 kHz",
+	logTSScrambled:   "%d scrambled packets",
 	logClockRebase:   "clock rebased, it was %s behind: the source is not keeping up with the requested bitrate",
 	logChannelDone:   "[%s] channel finished: source exhausted",
 	logAllDone:       "every channel has finished; nothing left to emit",
@@ -332,11 +361,25 @@ var msgsES = msgs{
 	errExecEmpty:        "la orden de exec está vacía",
 	errExecFailed:       "la orden de origen ha fallado (%v); su última salida: %s",
 
-	warnNoDstFilter:  "[%s] esta plataforma no puede filtrar por dirección de destino: el tráfico unicast o broadcast ajeno que llegue al puerto %d también se reenviará",
-	warnSockbuf:      "[%s] no se pudo fijar %s a %d bytes: %v",
-	warnNoSSM:        "[%s] no hay join por fuente disponible (%v): se une al grupo entero y se filtran los emisores aquí, lo que funciona pero no corta el tráfico aguas arriba",
-	logSSMJoined:     "[%s] join por fuente (SSM) a %s desde %s",
-	logLastDrop:      "[%s] último datagrama descartado: %s",
+	warnNoDstFilter: "[%s] esta plataforma no puede filtrar por dirección de destino: el tráfico unicast o broadcast ajeno que llegue al puerto %d también se reenviará",
+	warnSockbuf:     "[%s] no se pudo fijar %s a %d bytes: %v",
+	warnNoSSM:       "[%s] no hay join por fuente disponible (%v): se une al grupo entero y se filtran los emisores aquí, lo que funciona pero no corta el tráfico aguas arriba",
+	logSSMJoined:    "[%s] join por fuente (SSM) a %s desde %s",
+	logLastDrop:     "[%s] último datagrama descartado: %s",
+
+	logTSProgram:     "programa %d: PCR en el PID %d · %s",
+	logTSContents:    "[%s] lleva %s",
+	logTSHealth:      "[%s] TS: %s",
+	logTSNotTS:       "%d datagramas no son MPEG-TS",
+	logTSMisaligned:  "%d datagramas no traen paquetes enteros de 188 bytes",
+	logTSContinuity:  "%d errores de continuidad (peor PID %d)",
+	logTSTEI:         "%d paquetes marcados como corruptos aguas arriba (TEI)",
+	logTSPCRJump:     "%d saltos de PCR sin discontinuity_indicator",
+	logTSPCRGap:      "%d intervalos de PCR por encima del límite, máx %.0f ms (tope %d)",
+	logTSPATGap:      "%d intervalos de PAT por encima del límite, máx %.0f ms (tope %d)",
+	logTSNoPCR:       "sin PCR: no hay reloj al que engancharse",
+	logTSPCRNoExt:    "PCR sin extensión de 27 MHz: reloj cuantizado a 90 kHz",
+	logTSScrambled:   "%d paquetes cifrados",
 	logClockRebase:   "reloj rebasado, iba %s por detrás: la fuente no da el bitrate pedido",
 	logChannelDone:   "[%s] canal terminado: fuente agotada",
 	logAllDone:       "todos los canales han terminado; no queda nada que emitir",
