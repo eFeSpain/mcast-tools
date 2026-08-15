@@ -282,6 +282,26 @@ carries its sequence number in the first 8 bytes, so at the other end you can
 check that none is missing, none is repeated and they arrive in order. That is
 what the repository's automated test uses.
 
+### When it finishes, and what it reports while emitting
+
+With `-loop-file=false`, or when the `-stdin` pipe closes, the channel has done
+its job: it is logged as finished and, if no other channel is still emitting,
+**the process exits with status 0**. It does not hang around or reopen the
+source, which is what it would do if it confused "I am done" with "I crashed".
+
+The sender's summary does not carry the relay's columns, because it receives
+nothing:
+
+```
+[13:54:42] bars                950 pkt/s · tx   9.98 Mbps · 0 err · 0 rebase
+```
+
+`rebase` counts how many times the clock had to be **rebased** because the
+source was not keeping up with the requested bitrate — a slow disk, ffmpeg
+taking a while to start, or simply a bitrate configured above what the material
+can give. A `rebase` that keeps climbing means you are asking for more than your
+source can deliver; the stream still goes out, but not at the rate you think.
+
 ### It is a byte pump, not a muxer
 
 `mcast-send` chunks and paces; it parses nothing. That covers the normal IPTV
@@ -430,18 +450,25 @@ there and startup says so explicitly, per channel.
 ## Limitations
 
 - **IPv4 only.**
-- **No SSM, no source filtering** (IGMPv3): you cannot ask for "this group, but
-  only from sender X".
+- **The source-specific join (SSM) is not available everywhere.** Filtering by
+  sender with `from` always works, but the traffic is only cut off *in the
+  network* where the platform implements the source-specific join. On Windows
+  `x/net` does not, so there the filtering happens in the relay itself: it
+  protects the stream just the same, but the foreign sender's traffic reaches
+  the NIC and is discarded afterwards. Startup warns about it.
 - **One syscall per packet per destination.** It does not use
   `recvmmsg`/`sendmmsg`. Plenty for dozens of channels; if you need hundreds,
   that is where the ceiling is.
 - **Linux is the primary platform.** It builds and runs on Windows and
   macOS/BSD, but Windows has neither `SIGHUP` (no hot reload) nor the ability to
   filter by destination address (startup warns about it).
-- The data path **is** covered now: the suite brings up `mcast-send`, a
-  `mcast-dup` and a receiver in the same process and checks that the numbered
-  pattern arrives complete, with no duplicates, no gaps and no mixing with
-  another group. It skips itself if the machine has no multicast-capable NIC.
+- **What the tests do not reach.** The data path is covered — the suite brings
+  up sender, relay and receiver and checks that the numbered pattern arrives
+  complete, with no duplicates, no gaps and no mixing with another group — but
+  **SSM filtering at the network level** is not: proving that the switch does
+  not even send us other senders' traffic needs IGMPv3 in the path, and that
+  cannot be set up on a CI runner. What is verified is that the join happens
+  and that the foreign sender does not reach the destination.
 
 ## License
 

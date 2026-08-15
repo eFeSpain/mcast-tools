@@ -283,6 +283,26 @@ número de secuencia en los 8 primeros bytes, así que en el otro extremo se pue
 comprobar que no falta ninguno, que no se repiten y que llegan en orden. Es lo
 que usa la prueba automática del repositorio.
 
+### Cuándo termina, y qué dice mientras emite
+
+Con `-loop-file=false`, o cuando se cierra la tubería de `-stdin`, el canal ha
+hecho su trabajo: se registra como terminado y, si no queda ningún otro canal
+emitiendo, **el proceso sale con código 0**. No se queda dando vueltas ni
+reabre la fuente, que es lo que haría si confundiera «he acabado» con «me he
+caído».
+
+El resumen del emisor no lleva las columnas del relé, porque no recibe nada:
+
+```
+[13:54:42] barras              950 pkt/s · tx   9.98 Mbps · 0 err · 0 rebase
+```
+
+`rebase` cuenta las veces que hubo que **rebasar el reloj** porque la fuente no
+daba el bitrate pedido —un disco lento, ffmpeg tardando en arrancar, o
+sencillamente un bitrate configurado por encima de lo que el material da de
+sí—. Un `rebase` que sube constantemente significa que estás pidiendo más de lo
+que tu fuente puede entregar; el flujo sale igual, pero no al ritmo que crees.
+
 ### Es un bombeador de bytes, no un multiplexor
 
 `mcast-send` trocea y pacea; no parsea nada. Con eso cubre el caso normal de
@@ -429,17 +449,23 @@ arranque lo avisa explícitamente por canal.
 ## Limitaciones
 
 - **Solo IPv4.**
-- **Sin SSM ni filtrado por fuente** (IGMPv3): no se puede pedir «este grupo,
-  pero solo del emisor X».
+- **El join por fuente (SSM) no está en todas partes.** El filtrado por emisor
+  con `from` funciona siempre, pero solo se corta el tráfico *en la red* donde
+  la plataforma implementa el join por fuente. En Windows `x/net` no lo hace, y
+  allí se filtra en el propio relé: protege el flujo igual, pero el tráfico del
+  emisor ajeno llega a la NIC y se descarta después. El arranque lo avisa.
 - **Una syscall por paquete y destino.** No usa `recvmmsg`/`sendmmsg`. Sobra
   para decenas de canales; si necesitas cientos, el techo está aquí.
 - **Linux es la plataforma principal.** Compila y funciona en Windows y
   macOS/BSD, pero en Windows no existe `SIGHUP` (no hay recarga en caliente) ni
   se puede filtrar por dirección de destino (el arranque lo avisa).
-- El camino de datos **sí** está cubierto: la suite levanta `mcast-send`, un
-  `mcast-dup` y un receptor en el mismo proceso y comprueba que el patrón
-  numerado llega entero, sin duplicados, sin huecos y sin mezclarse con otro
-  grupo. Se salta sola si la máquina no tiene una NIC con multicast.
+- **Lo que las pruebas no alcanzan.** El camino de datos sí está cubierto —la
+  suite levanta emisor, relé y receptor y comprueba que el patrón numerado
+  llega entero, sin duplicados, sin huecos y sin mezclarse con otro grupo—,
+  pero el **filtrado SSM a nivel de red** no: comprobar que el switch no nos
+  manda siquiera el tráfico de otros emisores exige IGMPv3 en el camino y no se
+  puede montar en un runner de CI. Lo que sí se verifica es que el join se hace
+  y que el emisor ajeno no llega al destino.
 
 ## Licencia
 
