@@ -2,7 +2,7 @@
 
 [Español](README.md) · **English**
 
-[![CI](https://github.com/eFeSpain/mcast-dup/actions/workflows/ci.yml/badge.svg)](https://github.com/eFeSpain/mcast-dup/actions/workflows/ci.yml)
+[![CI](https://github.com/eFeSpain/mcast-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/eFeSpain/mcast-tools/actions/workflows/ci.yml)
 
 Two command-line tools for operating UDP multicast in video networks. Static
 binaries with no runtime dependencies, N channels per process and hot reload on

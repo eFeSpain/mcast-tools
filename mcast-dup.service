@@ -1,6 +1,6 @@
 [Unit]
 Description=mcast-dup — duplicador de flujos multicast UDP
-Documentation=https://github.com/eFeSpain/mcast-dup
+Documentation=https://github.com/eFeSpain/mcast-tools
 After=network-online.target
 Wants=network-online.target
 

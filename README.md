@@ -2,7 +2,7 @@
 
 **Español** · [English](README.en.md)
 
-[![CI](https://github.com/eFeSpain/mcast-dup/actions/workflows/ci.yml/badge.svg)](https://github.com/eFeSpain/mcast-dup/actions/workflows/ci.yml)
+[![CI](https://github.com/eFeSpain/mcast-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/eFeSpain/mcast-tools/actions/workflows/ci.yml)
 
 Dos herramientas de línea de órdenes para operar multicast UDP en redes de
 vídeo. Binarios estáticos sin dependencias en tiempo de ejecución, N canales por
